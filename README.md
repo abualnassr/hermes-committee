@@ -41,8 +41,8 @@ Enabling asks you to approve:
 Requires Hermes **0.23.0** or newer. After enabling:
 
 - run `hermes gateway restart`. A running gateway never switches to a new dependency environment,
-  so PDF reports only work after the restart. Restarting the Desktop app is not enough, because the
-  gateway is a separate process;
+  so PDF reports only work after the restart. Enabling, disabling or re-enabling the plugin again
+  later builds a new environment, which needs another restart;
 - open a new session, so the tools load.
 
 If a run finishes without a PDF, its result says why. `hermes committee report <run-id>` creates
