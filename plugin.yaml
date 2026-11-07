@@ -1,0 +1,42 @@
+manifest_version: 2
+api_version: 1
+name: hermes-committee
+label: Hermes Committee
+version: 0.1.0
+description: >-
+  Karpathy's LLM Council for Hermes: several AI models answer a question independently,
+  rank each other's anonymous answers, and a chairman writes the final answer. Adds seat
+  roles and instructions, a shared evidence pack, Stop-to-cancel, and a full Markdown + PDF
+  committee report. Run it with /hermes-committee:convene <question>.
+author: abualnassr
+kind: standalone
+license: MIT
+homepage: https://github.com/abualnassr/hermes-committee
+requires_hermes: ">=0.23.0"
+tags: [llm-council, multi-model, deliberation, decision-support, reports]
+capabilities:
+  - llm.provider_override
+  - llm.model_override
+provides_tools:
+  - committee_open
+  - committee_advance
+provides_hooks:
+  - post_tool_call
+  - on_session_end
+config_schema:
+  default_preset:
+    type: str
+    default: ""
+    description: "Preset used when a run names none. Empty = the classic template on your active model."
+  stage_timeout:
+    type: int
+    default: 300
+    description: "Seconds each stage may take (max 400; Hermes cuts tool calls at 420)."
+  max_tokens:
+    type: int
+    default: 4096
+    description: "Max output tokens per model call."
+  presets:
+    type: dict
+    default: {}
+    description: "Named committees: template, seats (provider/model, optional name/instructions), chairman. See README."

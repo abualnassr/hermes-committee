@@ -1,0 +1,10 @@
+[project]
+name = "hermes-committee"
+version = "0.1.0"
+description = "Karpathy's LLM Council for Hermes Agent, with seat roles, evidence and PDF reports."
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "fpdf2>=2.8,<3",
+    "uharfbuzz>=0.39,<1",
+]

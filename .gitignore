@@ -1,0 +1,21 @@
+# Private Hermes project files — never publish
+.hermes.md
+PROJECT_MEMORY.md
+project-memory/
+spikes/
+_archive/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Local run output
+samples/*.pdf
+runs/
+
+# Local test artefacts
+samples/
