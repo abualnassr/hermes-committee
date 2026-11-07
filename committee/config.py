@@ -119,7 +119,7 @@ def build_roster(settings: dict[str, Any] | None, *, preset: str | None = None, 
         "review": do_review,
         "quorum": quorum,
         "stage_timeout": min(timeout, STAGE_TIMEOUT_MAX),
-        "max_tokens": int(p.get("max_tokens") or settings.get("max_tokens") or 4096),
+        "max_tokens": int(p.get("max_tokens") or settings.get("max_tokens") or 8192),
         "warnings": warnings,
     }
 

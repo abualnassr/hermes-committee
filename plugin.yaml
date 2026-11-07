@@ -34,7 +34,7 @@ config_schema:
     description: "Seconds each stage may take (max 400; Hermes cuts tool calls at 420)."
   max_tokens:
     type: int
-    default: 4096
+    default: 8192
     description: "Max output tokens per model call."
   presets:
     type: dict
