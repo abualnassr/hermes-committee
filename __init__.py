@@ -181,7 +181,12 @@ def _render_reports(run: dict[str, Any]) -> None:
         run["reports"]["pdf"] = report_pdf.render(run, d / "report.pdf").as_posix()
     except Exception as exc:  # noqa: BLE001 - the Markdown report still stands
         logger.warning("hermes-committee: PDF report failed", exc_info=True)
-        run["reports"]["pdf_error"] = f"{type(exc).__name__}: {exc}"
+        msg = f"{type(exc).__name__}: {exc}"
+        if isinstance(exc, ImportError):
+            msg += (" — this Hermes process started before the plugin's PDF dependencies were installed. "
+                    "Restart the gateway (`hermes gateway restart`), then run "
+                    f"`hermes committee report {run['id']}` to create the PDF without new model calls.")
+        run["reports"]["pdf_error"] = msg
 
 
 def _final_payload(run: dict[str, Any]) -> dict[str, Any]:
