@@ -38,7 +38,15 @@ Enabling asks you to approve:
 - two Python packages: `fpdf2` and `uharfbuzz`, for the PDF report;
 - two capabilities: `llm.provider_override` and `llm.model_override`, so each seat can use a different model.
 
-Requires Hermes **0.23.0** or newer. Open a new session after enabling, so the tools load.
+Requires Hermes **0.23.0** or newer. After enabling:
+
+- run `hermes gateway restart`. A running gateway never switches to a new dependency environment,
+  so PDF reports only work after the restart. Restarting the Desktop app is not enough, because the
+  gateway is a separate process;
+- open a new session, so the tools load.
+
+If a run finishes without a PDF, its result says why. `hermes committee report <run-id>` creates
+the PDF from the saved run, with no new model calls.
 
 ## Quick start (zero configuration)
 
