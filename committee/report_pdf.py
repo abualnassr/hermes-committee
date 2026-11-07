@@ -15,10 +15,16 @@ from .engine import usage_totals
 from .report_md import DISCLAIMER, ranking_matrix
 
 FONTS = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+FOOTER = "Advisory output from AI models, not professional approval. Full disclaimer on the method page."
 INK, MUTED, RULE, ACCENT = (24, 24, 27), (100, 100, 110), (215, 215, 222), (37, 99, 235)
 _AR = re.compile(r"[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]")
 _INLINE = [(re.compile(r"\*\*(.+?)\*\*"), r"\1"), (re.compile(r"__(.+?)__"), r"\1"),
            (re.compile(r"`([^`]+)`"), r"\1"), (re.compile(r"\[([^\]]+)\]\(([^)]+)\)"), r"\1 (\2)")]
+
+
+def short_model(slot: dict[str, Any]) -> str:
+    """Model id without the provider route (tables); 'active model' when unset."""
+    return slot.get("model") or model_label(slot)
 
 
 def has_rtl(text: str) -> bool:
@@ -53,8 +59,8 @@ def _new_pdf(run: dict[str, Any]):
             self.set_y(-14)
             self.set_font("Sans", "", 7)
             self.set_text_color(*MUTED)
-            self.cell(self.epw - 12, 5, DISCLAIMER[:150], align="L")
-            self.cell(12, 5, f"{self.page_no()}/{{nb}}", align="R")
+            self.cell(self.epw - 20, 5, FOOTER, align="L")
+            self.cell(20, 5, f"{self.page_no()} / {{nb}}", align="R")
 
     pdf = Report(format="A4")
     pdf.set_margins(18, 16, 18)
@@ -98,8 +104,8 @@ class _W:
         self.para(text, size=size, bold=True, lh=7)
         self.pdf.ln(1)
 
-    def label(self, text: str):
-        self.para(text.upper(), size=8, bold=True, color=MUTED, lh=4.5)
+    def label(self, text: str, indent: float = 0):
+        self.para(text.upper(), size=8, bold=True, color=MUTED, lh=4.5, indent=indent)
 
     def bullets(self, items: list[str], size: float = 10):
         for it in items:
@@ -177,18 +183,18 @@ def render(run: dict[str, Any], out_path: Path) -> Path:
     pdf.ln(3)
     if ok_chair:
         y0, page0 = pdf.get_y(), pdf.page_no()
-        w.label("Verdict")
+        w.label("Verdict", indent=6)
         w.para(chair.get("decision") or "—", size=12, bold=True, indent=6, lh=6)
         conf = (chair.get("confidence") or "not stated").capitalize()
         w.para(f"Confidence: {conf}" + (f". {chair['confidence_note']}" if chair.get("confidence_note") else ""),
                size=9.5, color=MUTED, indent=6)
         for item in chair.get("reverse_if") or []:
             w.para(f"Would reverse if: {item}", size=9.5, color=MUTED, indent=6)
-        y1 = pdf.get_y() + 1
+        y1 = pdf.get_y()
         if pdf.page_no() == page0 and y1 > y0:   # accent bar beside the verdict block (never over text)
             pdf.set_fill_color(*ACCENT)
-            pdf.rect(pdf.l_margin, y0 - 1, 1.4, y1 - y0 + 1, "F")
-        pdf.set_y(y1 + 3)
+            pdf.rect(pdf.l_margin, y0, 1.4, y1 - y0, "F")
+        pdf.set_y(y1 + 4)
     else:
         w.para(f"No chairman verdict. {run.get('error') or ''}", size=11, bold=True)
 
@@ -198,12 +204,19 @@ def render(run: dict[str, Any], out_path: Path) -> Path:
         a = run["answers"].get(s["label"]) or {}
         r = rank.get(s["label"])
         conf = a.get("confidence")
-        rows.append([s["label"], s["name"], model_label(s),
-                     (a.get("summary") or a.get("error") or "")[:220],
+        rows.append([s["label"], s["name"], short_model(s), a.get("status", "not run"),
                      f"{conf:.2f}" if isinstance(conf, (int, float)) else "–",
                      f"{r['avg_rank']:.2f}" if r else "–"])
-    w.table(["", "Seat", "Model", "Position", "Conf.", "Rank"], rows, (7, 30, 34, 75, 14, 14))
-    w.para(f"Chairman: {model_label(run['chairman'])}", size=8.5, color=MUTED)
+    w.table(["", "Seat", "Model", "Stage 1", "Conf.", "Avg rank"], rows, (8, 52, 52, 22, 15, 25))
+    w.para(f"Chairman: {short_model(run['chairman'])}. Full provider routes are on each seat's page.",
+           size=8.5, color=MUTED)
+
+    w.heading("Positions")
+    for s in sorted(run["seats"], key=lambda s: s["label"]):
+        a = run["answers"].get(s["label"]) or {}
+        text = a.get("summary") if a.get("status") == "ok" else f"did not answer ({a.get('error', 'not run')})"
+        w.para(f"{s['label']} · {s['name']}: {text or '—'}", size=9.5, indent=2)
+        pdf.ln(0.8)
 
     if run.get("reviews"):
         w.heading("Peer ranking (anonymous)")
@@ -278,6 +291,8 @@ def render(run: dict[str, Any], out_path: Path) -> Path:
                f"Quorum: {run['quorum']} of {len(run['seats'])}; stage time limit {run['stage_timeout']} s",
                f"Model calls: {u['calls']}; tokens in {u['input_tokens'] or 'n/a'}, out {u['output_tokens'] or 'n/a'}; cost {cost}"]
               + [f"Warning: {x}" for x in run.get("warnings") or []], size=9.5)
+    w.heading("Disclaimer")
+    w.para(DISCLAIMER, size=9.5)
     if run.get("brief"):
         w.heading("Brief")
         w.markdown(run["brief"], 9.5)

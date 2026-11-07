@@ -309,6 +309,8 @@ def _cli_setup(sub):
     p.add_argument("--brief", default="")
     p.add_argument("--evidence-file", default=None, help="Text/Markdown file used as the evidence pack")
     p.add_argument("--lite", action="store_true", help="Skip Stage 2 (peer ranking)")
+    p = subs.add_parser("report", help="Re-render a finished run's Markdown and PDF reports (no model calls)")
+    p.add_argument("run_id")
 
 
 def _cli(args) -> int:
@@ -342,7 +344,17 @@ def _cli(args) -> int:
         return _doctor(getattr(args, "preset", None))
     if cmd == "run":
         return _cli_run(args)
-    print("Usage: hermes committee {templates|presets|runs|doctor|run}")
+    if cmd == "report":
+        run = store.load(_data_dir(), args.run_id)
+        if run is None or run["status"] not in ("done", "failed"):
+            print(f"No finished run {args.run_id!r}.")
+            return 1
+        _render_reports(run)
+        store.save(_data_dir(), run)
+        for k, v in run["reports"].items():
+            print(f"{k}: {v}")
+        return 0 if "pdf" in run["reports"] else 1
+    print("Usage: hermes committee {templates|presets|runs|doctor|run|report}")
     return 1
 
 
