@@ -25,7 +25,7 @@ from typing import Any
 from .templates import DEFAULT_TEMPLATE, get_template
 
 MIN_SEATS, MAX_SEATS = 2, 8
-STAGE_TIMEOUT_DEFAULT, STAGE_TIMEOUT_MAX = 300, 400   # Hermes cuts a tool call at 420 s
+STAGE_TIMEOUT_DEFAULT, STAGE_TIMEOUT_MAX = 360, 400   # Hermes cuts a tool call at 420 s
 MAX_INSTRUCTIONS = 1200
 _VIRTUAL_PROVIDERS = {"moa", "council"}                 # never fan out into another fan-out
 

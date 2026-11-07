@@ -30,7 +30,7 @@ config_schema:
     description: "Preset used when a run names none. Empty = the classic template on your active model."
   stage_timeout:
     type: int
-    default: 300
+    default: 360
     description: "Seconds each stage may take (max 400; Hermes cuts tool calls at 420)."
   max_tokens:
     type: int
