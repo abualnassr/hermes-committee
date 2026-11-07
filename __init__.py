@@ -302,6 +302,13 @@ def _cli_setup(sub):
     subs.add_parser("runs", help="List recent runs and their reports")
     p = subs.add_parser("doctor", help="Check that every seat of a preset can answer (one tiny call per seat)")
     p.add_argument("--preset", default=None)
+    p = subs.add_parser("run", help="Run a committee from the terminal (headless; works in scripts and cron)")
+    p.add_argument("question")
+    p.add_argument("--preset", default=None)
+    p.add_argument("--template", default=None)
+    p.add_argument("--brief", default="")
+    p.add_argument("--evidence-file", default=None, help="Text/Markdown file used as the evidence pack")
+    p.add_argument("--lite", action="store_true", help="Skip Stage 2 (peer ranking)")
 
 
 def _cli(args) -> int:
@@ -333,8 +340,41 @@ def _cli(args) -> int:
         return 0
     if cmd == "doctor":
         return _doctor(getattr(args, "preset", None))
-    print("Usage: hermes committee {templates|presets|runs|doctor [--preset NAME]}")
+    if cmd == "run":
+        return _cli_run(args)
+    print("Usage: hermes committee {templates|presets|runs|doctor|run}")
     return 1
+
+
+def _cli_run(args) -> int:
+    evidence = ""
+    if args.evidence_file:
+        evidence = Path(args.evidence_file).read_text(encoding="utf-8")
+    req = {"question": args.question, "brief": args.brief, "evidence": evidence, "preset": args.preset,
+           "template": args.template, "review": False if args.lite else None}
+    opened = json.loads(handle_open({k: v for k, v in req.items() if v not in (None, "")}, session_id=""))
+    if not opened.get("ok"):
+        print(f"Could not open: {opened.get('error')}")
+        return 1
+    print(f"Run {opened['run_id']} · {opened['template']} · {opened['planned_model_calls']['total']} model calls planned")
+    for w in opened.get("warnings") or []:
+        print(f"Warning: {w}")
+    out: dict[str, Any] = {}
+    while True:
+        out = json.loads(handle_advance({"run_id": opened["run_id"]}, session_id=""))
+        if out.get("stage_completed"):
+            print(f"  ✓ {out['stage_completed']} ({out.get('answered', out.get('reviews'))} ok)")
+            continue
+        break
+    print(f"\nStatus: {out.get('status')}" + (f" — {out['error']}" if out.get("error") else ""))
+    if out.get("decision"):
+        print(f"Decision: {out['decision']}\nConfidence: {out.get('confidence')}")
+    for k, v in (out.get("reports") or {}).items():
+        print(f"{k}: {v}")
+    u = out.get("usage") or {}
+    print(f"Model calls: {u.get('calls')} · tokens in {u.get('input_tokens')} out {u.get('output_tokens')}"
+          f" · cost {u.get('cost_usd') if u.get('cost_usd') is not None else 'not reported'}")
+    return 0 if out.get("status") == "done" else 1
 
 
 def _doctor(preset: str | None) -> int:
