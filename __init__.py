@@ -175,10 +175,10 @@ def _render_reports(run: dict[str, Any]) -> None:
     d = store.run_dir(_data_dir(), run["id"])
     md_path = d / "report.md"
     md_path.write_text(report_md.render(run), encoding="utf-8")
-    run["reports"] = {"markdown": str(md_path)}
+    run["reports"] = {"markdown": md_path.as_posix()}
     try:
         from .committee import report_pdf
-        run["reports"]["pdf"] = str(report_pdf.render(run, d / "report.pdf"))
+        run["reports"]["pdf"] = report_pdf.render(run, d / "report.pdf").as_posix()
     except Exception as exc:  # noqa: BLE001 - the Markdown report still stands
         logger.warning("hermes-committee: PDF report failed", exc_info=True)
         run["reports"]["pdf_error"] = f"{type(exc).__name__}: {exc}"

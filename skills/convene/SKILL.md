@@ -53,7 +53,7 @@ When `status` is `done`:
 - Give the committee's final answer (from `final_answer`), trimmed to what matters.
 - A compact table: seat · model · position · confidence. Then the peer-ranking order.
 - State any **dissent** explicitly. Never present a split committee as unanimous.
-- Deliver the PDF report: put `MEDIA:<reports.pdf>` on its own line. Mention the Markdown
+- Deliver the PDF report: put `MEDIA:<reports.pdf>` alone on its own line, using the path exactly as returned (forward slashes, no leading slash before a drive letter, not inside a link or backticks). Mention the Markdown
   report path too (`reports.markdown`); it is the copyable, searchable version.
 - If `usage.cost_usd` is null, say cost was not reported by the providers; never estimate it
   as a fact.
