@@ -94,5 +94,5 @@ def get_template(name: str | None) -> dict[str, Any]:
 
 
 def list_templates() -> list[dict[str, Any]]:
-    return [{"id": k, "title": v["title"], "description": v["description"],
-             "seats": [s["name"] for s in v["seats"]]} for k, v in TEMPLATES.items()]
+    return [{"id": k, "title": v["title"], "description": v["description"], "chairman_guidance": v["chairman_guidance"],
+             "decision_focus": v["decision_focus"], "seats": [s["name"] for s in v["seats"]]} for k, v in TEMPLATES.items()]

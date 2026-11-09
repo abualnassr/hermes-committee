@@ -19,3 +19,6 @@ runs/
 
 # Local test artefacts
 samples/
+
+# Private plans
+.hermes/

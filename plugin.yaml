@@ -2,7 +2,7 @@ manifest_version: 2
 api_version: 1
 name: hermes-committee
 label: Hermes Committee
-version: 0.1.0
+version: 0.3.0
 description: >-
   Karpathy's LLM Council for Hermes: several AI models answer a question independently,
   rank each other's anonymous answers, and a chairman writes the final answer. Adds seat
@@ -36,6 +36,18 @@ config_schema:
     type: int
     default: 8192
     description: "Max output tokens per model call."
+  max_minutes:
+    type: int
+    default: 10
+    description: "Default time limit for a whole committee run, in minutes (0 = no limit, max 60). Time for the chairman is reserved; the blind vote is skipped if time runs short."
+  max_usd:
+    type: float
+    default: 2
+    description: "Default budget for a whole committee run in USD (0 = no limit). Estimated from token counts and list prices; subscription seats count $0."
+  billing:
+    type: dict
+    default: {}
+    description: "Per-provider billing override, e.g. {openrouter: paid, my-provider: subscription}. Normally guessed from how Hermes signs in."
   presets:
     type: dict
     default: {}

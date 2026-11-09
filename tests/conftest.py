@@ -1,6 +1,9 @@
 """Shared fixtures: a deterministic fake LLM for the pure engine, and a fake Hermes ctx for the glue."""
 from __future__ import annotations
 
+import os
+os.environ["HERMES_COMMITTEE_NO_HERMES_PRICES"] = "1"   # offline: no Hermes pricing tables
+
 import importlib.util
 import re
 import sys
@@ -22,8 +25,10 @@ _LABELS = re.compile(r"## Response ([A-Z])")
 class FakeLLM:
     """Answers by schema. ``fail``/``slow``/``text_only`` are keyed by model id."""
 
-    def __init__(self, fail=(), slow=None, text_only=(), self_identify=False):
+    def __init__(self, fail=(), slow=None, text_only=(), self_identify=False, agenda=None, replies=None):
         self.fail, self.slow, self.text_only = set(fail), dict(slow or {}), set(text_only)
+        self.agenda = agenda or {"disputes": [], "reason": "They agree."}   # what the chairman lists
+        self.replies = dict(replies or {})          # model id -> reply dict (default: hold on every point)
         self.self_identify = self_identify
         self.calls: list[dict] = []
         self._lock = threading.Lock()
@@ -32,9 +37,10 @@ class FakeLLM:
         with self._lock:
             self.calls.append(kw)
 
-    def structured(self, *, provider, model, instructions, text, schema, schema_name, max_tokens, timeout, purpose):
+    def structured(self, *, provider, model, instructions, text, schema, schema_name, max_tokens, timeout, purpose,
+                   images=()):
         self._log(kind="structured", provider=provider, model=model, instructions=instructions, text=text,
-                  schema_name=schema_name)
+                  schema_name=schema_name, images=len(images or ()))
         if model in self.slow:
             time.sleep(self.slow[model])
         if model in self.fail:
@@ -48,6 +54,9 @@ class FakeLLM:
                                   "summary": f"{model} says incremental", "confidence": 0.8, "key_points": ["k"],
                                   "assumptions": [], "risks": ["r"], "would_change_mind": "new data",
                                   "evidence_gaps": []}, usage=u, provider=provider, model=model)
+        if schema_name == "committee_picture":
+            return Reply("json", {"description": f"A gearbox with worn teeth (seen by {model}).", "visible_text": "GB-7",
+                                  "unclear": ""}, usage=u, provider=provider, model=model)
         if schema_name == "committee_review":
             labels = _LABELS.findall(text)
             return Reply("json", {"evaluations": [{"label": l, "strengths": "clear", "weaknesses": "thin"} for l in labels],
@@ -56,7 +65,22 @@ class FakeLLM:
             return Reply("json", {"final_answer": "## Verdict\nGo incremental.\n- step one", "decision": "Go incremental.",
                                   "confidence": "high", "confidence_note": "all agree", "reverse_if": ["EOL platform"],
                                   "agreement": ["incremental"], "dissent": [{"label": "B", "view": "partial rewrite"}],
-                                  "open_questions": [], "next_actions": ["map modules"]},
+                                  "open_questions": [], "next_actions": ["map modules"],
+                                  "executive_summary": {"bottom_line": "Go incremental; it is the safer path.",
+                                                        "reasons": ["Lower risk."], "change": ""}},
+                         usage=u, provider=provider, model=model)
+        if schema_name == "committee_agenda":
+            return Reply("json", self.agenda, usage=u, provider=provider, model=model)
+        if schema_name == "committee_reply":
+            if model in self.replies:
+                return Reply("json", self.replies[model], usage=u, provider=provider, model=model)
+            ids = re.findall(r"^## (D\d) \(", text, re.M)
+            sides = re.findall(r"^- (.+?) \[(.+?)\]:", text, re.M)
+            me = re.search(r"You are (.+?), a member", instructions).group(1)
+            mine = dict(sides).get(me, "")
+            return Reply("json", {"responses": [{"dispute": d, "stance": "hold", "side": mine, "argument": "I hold.",
+                                                 "evidence": []} for d in dict.fromkeys(ids)],
+                                  "updated_position": f"{model} still says incremental", "confidence": 0.7},
                          usage=u, provider=provider, model=model)
         raise AssertionError(schema_name)
 
@@ -70,6 +94,7 @@ class FakeLLM:
 
 PRESET_SETTINGS = {
     "default_preset": "board",
+    "deliberate": "never",          # legacy tests: the three-stage flow; deliberation tests opt in
     "presets": {"board": {
         "template": "decision-board",
         "chairman": {"provider": "p-chair", "model": "m-chair"},
@@ -119,7 +144,8 @@ class FakeCtx:
                     provider=None, model=None):
         r = self._fake.structured(provider=provider or "", model=model or "", instructions=instructions,
                                   text=input[0]["text"], schema=json_schema, schema_name=schema_name,
-                                  max_tokens=max_tokens, timeout=timeout, purpose=purpose)
+                                  max_tokens=max_tokens, timeout=timeout, purpose=purpose,
+                                  images=[b for b in input[1:] if b.get("type") == "image" and b.get("data")])
         usage = SimpleNamespace(**{k: r.usage.get(k) for k in ("input_tokens", "output_tokens", "cost_usd")})
         return SimpleNamespace(content_type=r.content_type, parsed=r.parsed, text=r.text, usage=usage,
                                provider=provider, model=model)

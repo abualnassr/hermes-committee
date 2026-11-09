@@ -1,10 +1,12 @@
 [project]
 name = "hermes-committee"
-version = "0.1.0"
+version = "0.3.0"
 description = "Karpathy's LLM Council for Hermes Agent, with seat roles, evidence and PDF reports."
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
     "fpdf2>=2.8,<3",
     "uharfbuzz>=0.39,<1",
+    "pypdf>=5,<7",
+    "openpyxl>=3.1,<4",
 ]

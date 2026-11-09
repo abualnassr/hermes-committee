@@ -16,8 +16,9 @@ import json
 import logging
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+from .committee import followup  # noqa: E402
 from .committee import __version__
 from .committee import config as cconfig
 from .committee import engine, report_md, store
@@ -44,8 +45,12 @@ def _data_dir() -> Path:
 
 def _settings() -> dict[str, Any]:
     get = _CTX.get_config
-    return {"default_preset": get("default_preset", ""), "presets": get("presets", {}) or {},
-            "stage_timeout": get("stage_timeout", None), "max_tokens": get("max_tokens", None)}
+    presets, _src = store.effective_presets(_data_dir(), get("presets", {}) or {})
+    default = get("default_preset", "") or ""
+    return {"default_preset": default if default in presets else "", "presets": presets,
+            "stage_timeout": get("stage_timeout", None), "max_tokens": get("max_tokens", None),
+            "max_minutes": get("max_minutes", None), "max_usd": get("max_usd", None),
+            "billing": get("billing", {}) or {}}
 
 
 def _usage(u: Any) -> dict[str, Any]:
@@ -65,9 +70,12 @@ class _HermesLLM:
     def _route(provider: str, model: str) -> dict[str, str]:
         return {k: v for k, v in (("provider", provider), ("model", model)) if v}
 
-    def structured(self, *, provider, model, instructions, text, schema, schema_name, max_tokens, timeout, purpose):
+    def structured(self, *, provider, model, instructions, text, schema, schema_name, max_tokens, timeout, purpose,
+                   images=()):
+        blocks = [{"type": "text", "text": text}] + [
+            {"type": "image", "data": i["data"], "mime_type": i.get("mime_type") or "image/jpeg"} for i in images or ()]
         r = self.ctx.llm.complete_structured(
-            instructions=instructions, input=[{"type": "text", "text": text}], json_schema=schema,
+            instructions=instructions, input=blocks, json_schema=schema,
             schema_name=schema_name, max_tokens=max_tokens, timeout=timeout, purpose=purpose,
             **self._route(provider, model))
         return Reply(content_type=r.content_type, parsed=r.parsed, text=r.text or "", usage=_usage(r.usage),
@@ -97,11 +105,45 @@ def _toast(entry: dict[str, Any], text: str) -> None:
         logger.debug("hermes-committee: progress update failed", exc_info=True)
 
 
+class _CancelSignal(threading.Event):
+    """Set by Stop in the chat (hooks) or by the Desktop page's Stop button (a flag file in the
+    run folder). The engine polls ``is_set()`` every half second while it waits on seats."""
+
+    def __init__(self, run_id: str):
+        super().__init__()
+        self.run_id = run_id
+
+    def is_set(self) -> bool:  # noqa: D401
+        if super().is_set():
+            return True
+        if store.cancel_requested(_data_dir(), self.run_id):
+            self.set()
+            return True
+        return False
+
+    def requests(self) -> list:
+        """Extend / decline answers sent from the Committee page (see engine.apply_requests)."""
+        return store.read_requests(_data_dir(), self.run_id)
+
+
+def _publish(run: dict[str, Any]) -> None:
+    """Persist the run and tell the Desktop page it changed. Best-effort: never fails a stage."""
+    try:
+        store.save(_data_dir(), run)
+    except Exception:  # noqa: BLE001
+        logger.debug("hermes-committee: live save failed", exc_info=True)
+    try:
+        from hermes_cli.plugin_events import broadcast_plugin_event
+        broadcast_plugin_event(PLUGIN_ID, "run.updated", {"run_id": run["id"], "status": run.get("status")})
+    except Exception:  # noqa: BLE001 - no Desktop attached, or an older Hermes
+        logger.debug("hermes-committee: run event not delivered", exc_info=True)
+
+
 def _entry(run: dict[str, Any], session_id: str) -> dict[str, Any]:
     with _LOCK:
         e = _ACTIVE.get(run["id"])
         if e is None:
-            e = _ACTIVE[run["id"]] = {"cancel": threading.Event(), "session": session_id, "handle": None,
+            e = _ACTIVE[run["id"]] = {"cancel": _CancelSignal(run["id"]), "session": session_id, "handle": None,
                                       "busy": False}
         if session_id:
             e["session"] = session_id
@@ -113,6 +155,8 @@ def _entry(run: dict[str, Any], session_id: str) -> dict[str, Any]:
 OPEN_SCHEMA = {
     "name": "committee_open",
     "description": (
+        "Use when the user asks, in any words, to convene a committee or council on a question (often with "
+        "attached files). "
         "Convene a committee of AI models (Karpathy's LLM Council): seats answer a question independently, "
         "rank each other's anonymous answers, and a chairman writes the final answer, with a Markdown and "
         "PDF report. Use only for hard, contested or high-stakes questions — it makes several model calls. "
@@ -132,22 +176,257 @@ OPEN_SCHEMA = {
                           "provider": {"type": "string"}, "model": {"type": "string"}},
                           "required": ["name"]}},
             "review": {"type": "boolean", "description": "Run the anonymous peer-ranking stage (default true)."},
+            "deliberate": {"type": "string", "enum": ["material", "action", "always", "never"],
+                           "description": "Let the members debate the points they disagree on before the chairman "
+                                          "decides. material (default): when they differ on the action or on a claim "
+                                          "the decision rests on; action: only when they recommend different "
+                                          "actions; always; never. Set only when the user asks."},
+            "chairman_guidance": {"type": "string", "description":
+                                  "What the chairman's verdict must contain, when the user says so (e.g. 'rank the "
+                                  "options by cost'). Omit to use the committee type's brief."},
+            "decision_focus": {"type": "boolean", "description":
+                               "true: every seat must end with a clear recommendation (a decision). false: an answer "
+                               "to a question. Omit to use the committee type's mode."},
+            "deliberate_rounds": {"type": "integer", "enum": [1, 2],
+                                  "description": "Debate rounds (default 1). 2 only when the user asks."},
+            "evidence_files": {"type": "array", "items": {"type": "string"},
+                               "description": "Local paths of files the user attached or named (text, PDF, Word, Excel, photos). Every seat reads them; photos go to seats whose model can see pictures."},
+            "evidence_paths": {"type": "array", "items": {"type": "string"},
+                               "description": "With a draft only: local paths of files attached in this chat (the draft already holds the page's files)."},
+            "title": {"type": "string", "description": "A short name for this committee (shown in History and on the report). Only if the user gives one."},
+            "follow_of": {"type": "string", "description": "run_id of an earlier committee this one follows up (\"convene again\", \"ask the committee again\"). Its verdict is given to the seats as background and its evidence files are reused unless you pass new ones; omit seats/template to keep the same committee."},
+            "max_usd": {"type": "number", "description": "Budget for the whole run in USD (0 = no limit). Omit to use the user's default ($2). Set only when the user names a budget."},
+            "max_minutes": {"type": "number", "description": "Time limit for the whole run in minutes (0 = no limit). Omit to use the user's default (10). Set only when the user asks."},
+            "draft": {"type": "string", "description": "Draft id from the Committee page (`draft=<id>` in the user's "
+                                                        "message). The draft holds the question, seats, models and "
+                                                        "evidence; pass only the id, plus brief/evidence you add."},
         },
-        "required": ["question"],
+        "required": [],
     },
 }
+
+
+def _from_draft(args: dict) -> dict:
+    """Merge a Committee-page draft into the tool arguments (the page's choices win for seats/models)."""
+    d = store.load_draft(_data_dir(), str(args["draft"]))
+    if d is None:
+        raise cconfig.ConfigError(f"Draft {args['draft']!r} was not found. Open the Committee page and press Convene again.")
+    merged = dict(args)
+    # Files attached in the chat are paths; files added on the page are ids in the draft's pack.
+    chat_paths = [*(args.get("evidence_paths") or []), *(args.get("evidence_files") or [])]
+    merged.pop("evidence_files", None)
+    merged["evidence_paths"] = chat_paths
+    merged["question"] = d.get("question") or args.get("question") or ""
+    merged["evidence"] = "\n\n".join(x for x in (d.get("evidence") or "", args.get("evidence") or "") if x.strip())
+    merged["brief"] = "\n\n".join(x for x in (d.get("brief") or "", args.get("brief") or "") if x.strip())
+    for k in ("template", "seats", "chairman", "review", "deliberate", "deliberate_rounds", "chairman_guidance",
+              "decision_focus", "preset", "max_minutes",
+              "max_usd", "evidence_pack",
+              "title", "follow_of", "follow_context", "follow_evidence"):
+        if d.get(k) not in (None, "", []):
+            merged[k] = d[k]
+    if d.get("evidence_pack") and isinstance(d.get("evidence_files"), list):
+        merged["evidence_files"] = d["evidence_files"]          # the ticked files, even when none are ticked
+    return merged
+
+
+def _follow_source(args: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The earlier run a follow-up builds on; without seats/template given, its committee is kept."""
+    fid = str(args.get("follow_of") or "").strip()
+    if not fid:
+        return None
+    try:
+        prev = store.load(_data_dir(), fid)
+    except ValueError:
+        prev = None
+    if prev is None:
+        raise cconfig.ConfigError(f"No earlier committee {fid!r} to follow up.")
+    if not args.get("seats") and not args.get("template") and not args.get("preset"):
+        args["template"] = prev.get("template")
+        args["seats"] = [{k: s[k] for k in ("name", "instructions", "provider", "model", "vision") if k in s}
+                         for s in prev.get("seats") or []]
+        args["chairman"] = {k: v for k, v in (prev.get("chairman") or {}).items() if k in ("provider", "model")}
+        if args.get("review") is None:
+            args["review"] = prev.get("review")
+        if prev.get("custom_brief"):
+            args.setdefault("chairman_guidance", prev.get("chairman_guidance"))
+            args.setdefault("decision_focus", prev.get("decision_focus"))
+        if args.get("deliberate") in (None, "") and prev.get("deliberate"):
+            args["deliberate"] = prev.get("deliberate")
+            args.setdefault("deliberate_rounds", prev.get("deliberate_rounds"))
+    return prev
+
+
+def _set_reserves(roster: dict[str, Any]) -> None:
+    """Time kept back for the chairman and the blind vote: the slowest of the last runs on these models
+    (median would under-reserve), clamped to 60–300 s. Falls back to the engine defaults."""
+    lim = roster.setdefault("limits", {})
+    if not lim.get("max_secs"):
+        return
+    try:
+        from .committee import insights
+        runs = [r for r in store.all_runs(_data_dir(), limit=20) if r.get("status") == "done"]
+        chair_key = cconfig.model_label(roster["chairman"])
+        chair, review = [], []
+        for r in runs:
+            secs = insights.stage_seconds(r)
+            if cconfig.model_label(r.get("chairman") or {}) == chair_key and "chair" in secs.get("chair", {}):
+                chair.append(secs["chair"]["chair"])
+            if secs.get("review"):
+                review.append(max(secs["review"].values()))
+        if chair:
+            lim["chair_reserve"] = int(min(300, max(60, max(chair[:5]) * 1.2)))
+        if review:
+            lim["review_reserve"] = int(min(300, max(60, max(review[:5]) * 1.2)))
+    except Exception:  # noqa: BLE001 - reserves are an optimisation; defaults stay
+        logger.debug("hermes-committee: could not size time reserves", exc_info=True)
+
+
+def _read_paths(paths: list[Any]) -> list[dict[str, Any]]:
+    from .committee import evidence as ev
+    files = []
+    for n, raw in enumerate(paths or []):
+        p = Path(str(raw)).expanduser()
+        if not p.is_file():
+            raise FileNotFoundError(f"Evidence file not found: {p}. Attach it again or give its full path.")
+        if p.stat().st_size > ev.MAX_FILE_BYTES:
+            raise ValueError(f"{p.name}: over the {ev.MAX_FILE_BYTES // (1024 * 1024)} MB limit per file.")
+        try:
+            f = ev.extract(p.name, p.read_bytes())
+        except ev.EvidenceError as exc:
+            raise ValueError(f"{p.name}: {exc}") from exc
+        files.append({**f, "fid": f"p{n:07d}"})
+    if len(files) > ev.MAX_FILES:
+        raise ValueError(f"A committee can read at most {ev.MAX_FILES} files.")
+    return files
+
+
+def _attach_evidence(run: dict[str, Any], args: dict[str, Any], prior: Optional[list] = None) -> None:
+    """Evidence files from the page (a pack) and/or the chat (paths) → run copy; then decide who
+    sees the pictures. A committee with pictures but no model that can see them is refused."""
+    from .committee import evidence as ev
+    from .committee import hostcaps
+    base = _data_dir()
+    files: list[dict[str, Any]] = list(prior or [])
+    if args.get("evidence_pack"):
+        fids = args.get("evidence_files") if isinstance(args.get("evidence_files"), list) else None
+        files += store.load_pack(base, str(args["evidence_pack"]), fids)
+    paths = args.get("evidence_paths") or ([] if args.get("evidence_pack") else args.get("evidence_files"))
+    if isinstance(paths, list) and paths:
+        files += _read_paths(paths)
+    if not files:
+        return
+    if sum(f["images"] for f in files) > ev.MAX_IMAGES:
+        raise ValueError(f"A committee can look at most {ev.MAX_IMAGES} pictures (photos and scanned pages).")
+    store.attach_files_to_run(base, run, files)
+    _route_pictures(run)
+
+
+def _route_pictures(run: dict[str, Any]) -> None:
+    from .committee import hostcaps
+    for slot in [*run["seats"], run["chairman"]]:
+        slot["sees_images"] = hostcaps.sees_images(slot)
+    if run["evidence_index"]["images"]:
+        seeing = [{k: s.get(k) for k in ("name", "provider", "model")}
+                  for s in [run["chairman"], *run["seats"]] if s["sees_images"]]
+        uniq = list({(d.get("provider"), d.get("model")): d for d in seeing}.values())
+        run["describer"], run["describer_alts"] = (uniq[0] if uniq else None), uniq[1:3]
+        undescribed = [i for i in run["evidence_index"]["images"] if i.get("description") is None]
+        if run["describer"] is None and undescribed:      # a follow-up reuses the earlier descriptions
+            raise ValueError("The evidence includes pictures, but none of this committee's models is known to see "
+                             "pictures. Give the chairman or one seat a vision model (or mark it 'Can see photos' "
+                             "in the seat editor), or remove the photos.")
+
+
+def _price_slots(run: dict[str, Any]) -> None:
+    """Each seat, the chairman and the describer get their list price and billing type."""
+    from .committee import hostcaps, pricing
+    overrides = _settings().get("billing") or {}
+    for slot in [*run["seats"], run["chairman"]]:
+        slot["price"] = hostcaps.price(slot, overrides=overrides)
+    if run.get("describer"):
+        src = next((s for s in [run["chairman"], *run["seats"]] if s.get("model") == run["describer"].get("model")
+                    and s.get("provider") == run["describer"].get("provider")), None)
+        run["describer"]["price"] = (src or {}).get("price") or hostcaps.price(run["describer"], overrides=overrides)
+    run["estimate"] = pricing.estimate(run)
+    unknown = run["estimate"]["unknown"]
+    if unknown and pricing.limit(run) is not None:
+        run["warnings"].append(f"No price is known for {', '.join(unknown)}: their calls are not counted "
+                               "toward the budget. Enter the price in the Committee page's budget menu, or mark "
+                               "the provider Subscription there.")
+
+
+def _cli_cost(u: dict[str, Any]) -> str:
+    from .committee.pricing import fmt
+    if u.get("est_charged") is None:
+        return f" · cost {u.get('cost_usd') if u.get('cost_usd') is not None else 'not reported'}"
+    out = f" · estimated cost {fmt(u['est_charged'])}"
+    if (u.get("est_list") or 0) > u["est_charged"]:
+        out += f" ({fmt(u['est_list'])} at list price)"
+    if u.get("limit_usd"):
+        out += f" of a {fmt(u['limit_usd'])} budget"
+    if u.get("est_unknown_calls"):
+        out += f"; {u['est_unknown_calls']} unpriced call(s) not counted"
+    return out
+
+
+def _budget_line(run: dict[str, Any]) -> str:
+    from .committee import pricing
+    est, lim = run.get("estimate") or {}, pricing.limit(run)
+    if not est:
+        return ""
+    line = f"estimated {pricing.fmt(est['low'])}–{pricing.fmt(est['high'])}"
+    line += f" (limit {pricing.fmt(lim)})" if lim else " (no budget limit)"
+    if est.get("subscription"):
+        line += f"; on a subscription, not counted: {', '.join(est['subscription'])}"
+    return line
+
+
+def _evidence_line(run: dict[str, Any]) -> str:
+    files = run.get("files") or []
+    if not files:
+        return ""
+    pics = len((run.get("evidence_index") or {}).get("images") or [])
+    seeing = [s["name"] for s in run["seats"] if s.get("sees_images")]
+    line = f"{len(files)} file(s), about {run['evidence_index'].get('tokens', 0):,} tokens per call"
+    if pics:
+        line += (f"; {pics} picture(s): seen by {len(seeing)} of {len(run['seats'])} seats, described for the rest")
+    return line
 
 
 def handle_open(args: dict, **kwargs) -> str:
     try:
         args = args or {}
+        if args.get("draft"):
+            args = _from_draft(args)
+        if not str(args.get("question") or "").strip():
+            return _err("A committee needs a question.")
+        prev = _follow_source(args)
         roster = cconfig.build_roster(_settings(), preset=args.get("preset"), template=args.get("template"),
-                                      seats=args.get("seats"), review=args.get("review"))
-        run = engine.new_run(roster, question=str(args.get("question") or ""), brief=str(args.get("brief") or ""),
+                                      seats=args.get("seats"), review=args.get("review"),
+                                      chairman=args.get("chairman"), exact=bool(args.get("draft")),
+                                      max_minutes=args.get("max_minutes"), max_usd=args.get("max_usd"),
+                                      deliberate=args.get("deliberate"), deliberate_rounds=args.get("deliberate_rounds"),
+                                      chairman_guidance=args.get("chairman_guidance"),
+                                      decision_focus=args.get("decision_focus"))
+        _set_reserves(roster)
+        brief = str(args.get("brief") or "")
+        if prev is not None and args.get("follow_context") is not False:
+            brief = "\n\n".join(x for x in (followup.context(prev), brief) if x.strip())
+        run = engine.new_run(roster, question=str(args.get("question") or ""), brief=brief,
                              evidence=str(args.get("evidence") or ""), session_id=str(kwargs.get("session_id") or ""))
-    except (cconfig.ConfigError, KeyError, ValueError) as exc:
+        if args.get("draft"):
+            run["draft"] = str(args["draft"])
+        run["title"] = followup.clean_title(args.get("title"))
+        prior = store.reuse_run_files(_data_dir(), prev) if prev is not None and args.get("follow_evidence") is not False else []
+        _attach_evidence(run, args, prior)
+        if prev is not None:
+            run["follow_of"] = prev["id"]
+            run["follow_prev"] = followup.prev_summary(prev)
+        _price_slots(run)
+    except (cconfig.ConfigError, KeyError, ValueError, FileNotFoundError) as exc:
         return _err(str(exc).strip("'\""))
-    store.save(_data_dir(), run)
+    _publish(run)
     e = _entry(run, run["session_id"])
     _toast(e, f"⏳ Committee convened ({run['template_title']}, {len(run['seats'])} seats)")
     return json.dumps({
@@ -155,7 +434,10 @@ def handle_open(args: dict, **kwargs) -> str:
         "template": run["template_title"], "preset": run["preset"],
         "seats": [{"name": s["name"], "model": cconfig.model_label(s)} for s in run["seats"]],
         "chairman": cconfig.model_label(run["chairman"]), "review": run["review"], "quorum": run["quorum"],
+        "deliberate": run["deliberate"], "deliberate_rounds": run["deliberate_rounds"],
         "planned_model_calls": cconfig.planned_calls(run), "warnings": run["warnings"],
+        "evidence": _evidence_line(run),
+        "budget": _budget_line(run),
         "next": "Call committee_advance with this run_id, and repeat until status is 'done' or 'failed'.",
     }, ensure_ascii=False)
 
@@ -213,6 +495,7 @@ def handle_advance(args: dict, **kwargs) -> str:
         return _err(str(exc))
     if run is None:
         return _err(f"No committee run {run_id!r}.")
+    store.load_run_evidence(base, run)
     if run["status"] in ("done", "failed", "cancelled"):
         return json.dumps(_final_payload(run), ensure_ascii=False)
 
@@ -225,10 +508,16 @@ def handle_advance(args: dict, **kwargs) -> str:
     try:
         if e["cancel"].is_set():
             raise engine.Cancelled()
-        stage = engine.advance(run, _HermesLLM(_CTX), e["cancel"], lambda m: _toast(e, f"⏳ Committee · {m}"))
+        def progress(m: str) -> None:
+            _toast(e, f"⏳ Committee · {m}")
+            _publish(run)
+
+        stage = engine.advance(run, _HermesLLM(_CTX), e["cancel"], progress)
     except engine.Cancelled:
         run["status"], run["next_stage"] = "cancelled", None
-        store.save(base, run)
+        if not any(t.get("event") == "cancelled" for t in run["timeline"]):
+            run["timeline"].append({"t": engine._now(), "event": "cancelled", "during": "between stages"})
+        _publish(run)
         _toast(e, "⏹ Committee cancelled. No further model calls will start.")
         with _LOCK:
             _ACTIVE.pop(run_id, None)
@@ -243,17 +532,24 @@ def handle_advance(args: dict, **kwargs) -> str:
             run["status"] = "done"
         _toast(e, ("✅ Committee done · report ready" if run["status"] == "done"
                    else f"⚠ Committee stopped: {run.get('error')}"))
-        store.save(base, run)
+        _publish(run)
         with _LOCK:
             _ACTIVE.pop(run_id, None)
         return json.dumps(_final_payload(run), ensure_ascii=False)
 
-    store.save(base, run)
+    _publish(run)
     if stage == "stage1":
         body = {"answered": sum(1 for a in run["answers"].values() if a["status"] == "ok"), "of": len(run["seats"]),
                 "seats": [{"seat": s["name"], "status": run["answers"][s["label"]]["status"],
                            "position": run["answers"][s["label"]].get("summary") or run["answers"][s["label"]].get("error")}
                           for s in run["seats"]]}
+    elif stage == "deliberate":
+        d = run.get("deliberation") or {}
+        body = {"deliberation": {"skipped": d.get("skipped"),
+                                 "disputes": [{"id": x["id"], "level": x["level"], "point": x["point"]}
+                                              for x in d.get("disputes") or []],
+                                 "rounds": len(d.get("rounds") or []),
+                                 "changed_minds": [f"{m['seat']} on {m['dispute']}" for m in d.get("moves") or []]}}
     else:
         body = {"reviews": sum(1 for r in run["reviews"].values() if r["status"] == "ok"),
                 "ranking": run["ranking"]}
@@ -279,7 +575,7 @@ def _cancel_session(session_id: str, why: str) -> None:
                 if run and run["status"] not in ("done", "failed", "cancelled"):
                     run["status"], run["next_stage"] = "cancelled", None
                     run["timeline"].append({"t": engine._now(), "event": "cancelled", "during": "between stages"})
-                    store.save(_data_dir(), run)
+                    _publish(run)
                     _toast(e, "⏹ Committee cancelled.")
             except Exception:  # noqa: BLE001
                 logger.debug("hermes-committee: cancel bookkeeping failed", exc_info=True)
@@ -312,8 +608,17 @@ def _cli_setup(sub):
     p.add_argument("--preset", default=None)
     p.add_argument("--template", default=None)
     p.add_argument("--brief", default="")
-    p.add_argument("--evidence-file", default=None, help="Text/Markdown file used as the evidence pack")
+    p.add_argument("--evidence-file", action="append", default=None,
+                   help="Evidence file (text, PDF, Word, Excel or photo); repeat for several")
+    p.add_argument("--evidence-dir", default=None, help="Folder whose supported files are all used as evidence")
     p.add_argument("--lite", action="store_true", help="Skip Stage 2 (peer ranking)")
+    p.add_argument("--deliberate", choices=["material", "action", "always", "never"], default=None,
+                   help="Debate disputed points before the verdict (default: material)")
+    p.add_argument("--rounds", type=int, choices=[1, 2], default=None, help="Deliberation rounds (default 1)")
+    p.add_argument("--max-minutes", type=float, default=None, help="Time limit for the whole run (0 = no limit)")
+    p.add_argument("--max-usd", type=float, default=None, help="Budget for the whole run in USD (0 = no limit)")
+    p.add_argument("--title", default=None, help="A short name for this committee")
+    p.add_argument("--follow-of", default=None, help="run_id of an earlier committee to follow up (same seats; its verdict as background)")
     p = subs.add_parser("report", help="Re-render a finished run's Markdown and PDF reports (no model calls)")
     p.add_argument("run_id")
 
@@ -364,23 +669,45 @@ def _cli(args) -> int:
 
 
 def _cli_run(args) -> int:
-    evidence = ""
-    if args.evidence_file:
-        evidence = Path(args.evidence_file).read_text(encoding="utf-8")
-    req = {"question": args.question, "brief": args.brief, "evidence": evidence, "preset": args.preset,
-           "template": args.template, "review": False if args.lite else None}
+    from .committee import evidence as ev
+    paths = list(args.evidence_file or [])
+    if args.evidence_dir:
+        paths += sorted(str(p) for p in Path(args.evidence_dir).rglob("*")
+                        if p.is_file() and p.suffix.lower() in ev.SUPPORTED_EXT)
+    req = {"question": args.question, "brief": args.brief, "evidence_paths": paths, "preset": args.preset,
+           "template": args.template, "review": False if args.lite else None, "max_minutes": args.max_minutes, "max_usd": args.max_usd,
+           "title": args.title, "follow_of": args.follow_of,
+           "deliberate": getattr(args, "deliberate", None), "deliberate_rounds": getattr(args, "rounds", None)}
     opened = json.loads(handle_open({k: v for k, v in req.items() if v not in (None, "")}, session_id=""))
     if not opened.get("ok"):
         print(f"Could not open: {opened.get('error')}")
         return 1
     print(f"Run {opened['run_id']} · {opened['template']} · {opened['planned_model_calls']['total']} model calls planned")
+    if opened.get("evidence"):
+        print(f"Evidence: {opened['evidence']}")
+    if opened.get("budget"):
+        print(f"Cost: {opened['budget']}")
     for w in opened.get("warnings") or []:
         print(f"Warning: {w}")
     out: dict[str, Any] = {}
+    seen_w: set[str] = set()
     while True:
         out = json.loads(handle_advance({"run_id": opened["run_id"]}, session_id=""))
         if out.get("stage_completed"):
-            print(f"  ✓ {out['stage_completed']} ({out.get('answered', out.get('reviews'))} ok)")
+            run_now = store.load(_data_dir(), opened["run_id"]) or {}
+            why = (run_now.get("skipped") or {}).get(out["stage_completed"])
+            if why:
+                print(f"  – {out['stage_completed']} skipped ({'budget' if why == 'budget' else 'time limit'})")
+            else:
+                if out["stage_completed"] == "deliberate":
+                    dd = out.get("deliberation") or {}
+                    print(f"  ✓ deliberate ({dd.get('skipped') or str(dd.get('rounds')) + ' round(s)'})")
+                else:
+                    print(f"  ✓ {out['stage_completed']} ({out.get('answered', out.get('reviews'))} ok)")
+            for w in (run_now.get("warnings") or [])[len(opened.get("warnings") or []):]:
+                if w not in seen_w:
+                    seen_w.add(w)
+                    print(f"  Note: {w}")
             continue
         break
     print(f"\nStatus: {out.get('status')}" + (f" — {out['error']}" if out.get("error") else ""))
@@ -390,7 +717,7 @@ def _cli_run(args) -> int:
         print(f"{k}: {v}")
     u = out.get("usage") or {}
     print(f"Model calls: {u.get('calls')} · tokens in {u.get('input_tokens')} out {u.get('output_tokens')}"
-          f" · cost {u.get('cost_usd') if u.get('cost_usd') is not None else 'not reported'}")
+          + _cli_cost(u))
     return 0 if out.get("status") == "done" else 1
 
 
@@ -433,6 +760,11 @@ def _doctor(preset: str | None) -> int:
 def register(ctx):
     global _CTX
     _CTX = ctx
+    try:
+        from .committee import hostcaps
+        hostcaps.set_base(_data_dir())
+    except Exception:  # noqa: BLE001 - model notes are optional
+        logger.debug("hermes-committee: no data dir for model notes", exc_info=True)
     ctx.register_tool(name="committee_open", toolset="committee", schema=OPEN_SCHEMA, handler=handle_open,
                       description="Convene an AI committee (LLM Council)", emoji="🏛")
     ctx.register_tool(name="committee_advance", toolset="committee", schema=ADVANCE_SCHEMA,

@@ -10,6 +10,19 @@ Council: **Stage 1** every seat answers independently, **Stage 2** seats rank ea
 anonymous answers, **Stage 3** a chairman writes the final answer. The plugin runs the stages;
 your job is the brief before and the presentation after.
 
+## 0. Started from the Committee page? (`draft=<id>`)
+
+If the message contains `draft=<id>` (for example `/hermes-committee:convene draft=d3f9a1b2c4 Should we…`),
+the user already set up the committee on the Committee page: question, seats, models, instructions
+and evidence are stored in that draft.
+
+- Do **not** ask clarifying questions and do **not** change the seats or models.
+- You may add a short `brief` from the conversation, and evidence only if the user attached files
+  or pasted data in this chat (files as `evidence_paths`, pasted data as `evidence`). Files added
+  on the page are already in the draft; do not pass them again.
+- Call `committee_open` with `draft` set to the id (plus `brief`/`evidence` if you added any),
+  then continue with step 4 below.
+
 ## 1. Frame the question
 
 - Take the question from the user's message (text after the command, or the conversation).
@@ -22,7 +35,15 @@ your job is the brief before and the presentation after.
 Seats have no tools. They reason only over what you give them, so the evidence pack is
 what makes the answers grounded:
 
-- Include facts the user supplied (attachments, numbers, logs, prior messages).
+- The user may ask in plain words ("convene a committee …") instead of the slash command: Hermes
+  Desktop does not allow a slash command with attachments, so a request with attached files always
+  arrives this way. Treat it exactly like the command.
+- **Files the user attached or named** (PDF, Word, Excel, text, photos): pass their local paths as
+  `evidence_files`. Do not paste their contents into `evidence`. The plugin reads each file once,
+  numbers the sections ([E1], [E2]…) and sends photos with a written description to every seat
+  (a seat whose model refuses the picture is retried with the description). If `committee_open`
+  reports that every model refused pictures before, tell the user and ask whether to drop the photos or change a seat's model.
+- Include other facts the user supplied (numbers, logs, prior messages) in `evidence`.
 - If the question depends on current or external facts and you have research tools, do a
   short, focused search and paste the relevant excerpts **with their sources**.
 - Never invent evidence. If something important is unknown, say so in the pack.
@@ -36,10 +57,30 @@ what makes the answers grounded:
 - If the user describes roles ("a structural engineer, a lawyer and a CFO"), pass them as
   `seats`, each with a `name` and specific `instructions` written from the user's wording.
 - `review: false` only if the user asks for a quick/lite run.
+- `deliberate` only if the user asks: "let them debate" / "make them argue it out" → `always`;
+  "no debate" / "quick" → `never`; "only if they disagree on what to do" → `action`. Otherwise omit
+  it (the default debates material disagreement). `deliberate_rounds: 2` only if the user asks for
+  a longer debate. When `committee_advance` reports a deliberation, mention in one line how many
+  points were debated and who changed their mind.
+- `max_minutes` only if the user names a time limit ("within 5 minutes" → 5; "no time limit" → 0).
+- `title` only if the user names the committee ("call it GB-7 gearbox").
+- **Follow-ups.** When the user asks the committee again in a chat where a committee already ran
+  ("convene again", "ask the committee whether…", "what if…, ask the committee"), pass
+  `follow_of` = that run's `run_id` and the new question. Leave out seats/template so the same
+  committee answers; its verdict goes to the seats as background and its evidence files are reused.
+  A plain question about the verdict ("why did the Skeptic disagree?") is not a follow-up: answer it
+  yourself from the result, without convening.
+- `max_usd` only if the user names a budget ("under a dollar" → 1; "no budget" → 0). The default is $2.
+  When `committee_open` returns a `budget` line, show it to the user in one short sentence
+  (the estimated range and the limit). If the run fails with "Not started" or "No verdict within
+  the … limit", tell the user plainly and suggest raising the budget or using cheaper seats.
+  Otherwise omit it: the user's default (10 minutes) applies. If the run reports the blind vote was
+  skipped or "No verdict within the … limit", tell the user plainly and suggest a longer limit.
 
 ## 4. Run it
 
-1. Call `committee_open` with `question`, `brief`, `evidence` and any choices from step 3.
+1. Call `committee_open` with `question`, `brief`, `evidence` and any choices from step 3
+   (or with `draft`, see step 0).
    If it returns an error, tell the user plainly and stop.
 2. Call `committee_advance` with the `run_id`. Repeat until `status` is `done`, `failed`
    or `cancelled`. Do not add commentary between calls. Each call runs one stage.

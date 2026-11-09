@@ -1,0 +1,12 @@
+{
+  "name": "hermes-committee",
+  "label": "Hermes Committee",
+  "description": "Run history, live progress, standings and preset data for the Committee page in Hermes Desktop",
+  "icon": "Users",
+  "version": "0.2.0",
+  "tab": {
+    "path": "/hermes-committee-dashboard",
+    "hidden": true
+  },
+  "api": "plugin_api.py"
+}
