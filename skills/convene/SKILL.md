@@ -1,12 +1,12 @@
 ---
 name: convene
-description: Convene an AI committee (Karpathy's LLM Council) on a hard question.
+description: Convene a committee of AI models on a hard question.
 ---
 
 # Convene the committee
 
-The user wants a committee of AI models to deliberate. The committee runs Karpathy's LLM
-Council: **Stage 1** every seat answers independently, **Stage 2** seats rank each other's
+The user wants a committee of AI models to deliberate. The committee runs in stages:
+**Stage 1** every seat answers independently, **Stage 2** seats rank each other's
 anonymous answers, **Stage 3** a chairman writes the final answer. The plugin runs the stages;
 your job is the brief before and the presentation after.
 

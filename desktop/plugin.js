@@ -506,7 +506,7 @@ function Help({ onClose, setup }) {
     h('div', { className: 'hc-card hc-help' },
       h('div', { className: 'hc-row' }, h('b', { style: { fontSize: 15 } }, 'How to use the Committee'), h('span', { className: 'hc-grow' }), h('button', { className: 'hc-link', onClick: onClose }, '✕ Close')),
       sec('What it does',
-        p('A committee is several AI models answering the same question. It runs in three stages, after Karpathy’s LLM Council:'),
+        p('A committee is several AI models answering the same question. It runs in stages:'),
         h('ol', { className: 'hc-list hc-sm' },
           h('li', null, h('b', null, 'Answers. '), 'Every seat answers on its own, without seeing the others.'),
           h('li', null, h('b', null, 'Blind vote. '), 'Each seat ranks the others’ answers, labelled only “Response A, B, C…”, so nobody can favour a brand.'),

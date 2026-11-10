@@ -4,7 +4,7 @@ A template is a roster of seat *roles* (name + instructions) plus guidance for t
 chairman. It never names a model: models come from the user's preset, or fall back to
 the user's active Hermes model.
 
-``classic`` is Karpathy's LLM Council as published: members get no persona, answer
+``classic``: members get no persona, answer
 independently, rank each other anonymously, and a chairman compiles the final answer.
 """
 from __future__ import annotations
@@ -14,8 +14,8 @@ from typing import Any
 
 TEMPLATES: dict[str, dict[str, Any]] = {
     "classic": {
-        "title": "Classic (LLM Council)",
-        "description": ("Karpathy's LLM Council: members answer independently with no persona, "
+        "title": "Classic",
+        "description": ("The plain committee: members answer independently with no role, "
                         "rank each other anonymously, and a chairman compiles one answer."),
         "seats": [
             {"name": "Member 1", "instructions": ""},

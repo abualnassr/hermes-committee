@@ -4,16 +4,16 @@ name: hermes-committee
 label: Hermes Committee
 version: 0.3.0
 description: >-
-  Karpathy's LLM Council for Hermes: several AI models answer a question independently,
-  rank each other's anonymous answers, and a chairman writes the final answer. Adds seat
-  roles and instructions, a shared evidence pack, Stop-to-cancel, and a full Markdown + PDF
-  committee report. Run it with /hermes-committee:convene <question>.
+  A committee of AI models for hard decisions: seats with their own roles and models answer
+  independently, rank each other's anonymous answers, debate where they disagree, and a
+  chairman writes the decision with dissent and next actions. Evidence files, time and budget
+  limits, a live Desktop page, and a Markdown + PDF report. Run it with /hermes-committee:convene <question>.
 author: abualnassr
 kind: standalone
 license: MIT
 homepage: https://github.com/abualnassr/hermes-committee
 requires_hermes: ">=0.23.0"
-tags: [llm-council, multi-model, deliberation, decision-support, reports]
+tags: [committee, multi-model, deliberation, decision-support, reports]
 capabilities:
   - llm.provider_override
   - llm.model_override

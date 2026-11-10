@@ -131,7 +131,7 @@ def _new_pdf(run: dict[str, Any], theme: dict):
     pdf.set_subject(_plain(run.get("question") or "")[:200])
     pdf.set_creator(f"{PRODUCT} {__version__} (plugin for Hermes Agent)")
     pdf.set_author(PRODUCT)
-    pdf.set_keywords("Hermes Committee, LLM council, committee report")
+    pdf.set_keywords("Hermes Committee, AI committee, decision report")
     return pdf, XPos, YPos
 
 

@@ -3,10 +3,10 @@
 **Ask several AI models the same hard question. They answer on their own, rank each other's
 answers blind, and a chairman model writes the verdict.**
 
-It is Karpathy's [LLM Council](https://github.com/karpathy/llm-council) for
-[Hermes Agent](https://hermes-agent.nousresearch.com), with a Desktop page where you can pick a
-model for each seat, give each seat its own instructions, watch the run live, and read the result.
-It also writes a PDF report.
+A plugin for [Hermes Agent](https://hermes-agent.nousresearch.com). Give each seat a role, a model
+and its own instructions, add your evidence, let the seats debate where they disagree, and set a
+time limit and budget. A Desktop page shows the run live, and every committee ends with a
+decision, its dissent, next actions and a PDF report.
 
 | 1 · Brief | 2 · Convene | 3 · Decision |
 |---|---|---|
@@ -89,7 +89,7 @@ Choose a **committee type** from the chips under the question:
 
 | Committee | Seats | Good for |
 |---|---|---|
-| **Classic (LLM Council)** | 4 members, same task | Karpathy's original council, any question |
+| **Classic** | 4 members, same task, no roles | Any question; the purest comparison of models |
 | **Expert Panel** | Domain Expert, Practitioner, Researcher, Skeptic | Technical questions |
 | **Decision Board** | Strategist, Risk Officer, Operator, Finance | Choosing between options |
 | **Red Team** | Pre-mortem, Assumption Auditor, Adversary, Edge-case Hunter | Stress-testing a plan or claim |
@@ -364,14 +364,14 @@ files, use the Committee page, where you can see each file's size and the cost b
 
 ### How it works
 
-| Stage | What happens | Same as Karpathy's council? |
+| Stage | What happens | Notes |
 |---|---|---|
-| 0. Brief | Hermes frames the question and gathers an **evidence pack** (your files, numbers, short research with sources). From the page, your evidence box is the pack. | Added |
-| 1. Answers | Every seat answers **independently and in parallel**, with its role and instructions. | Yes, roles optional |
-| 2. Peer ranking | Every seat ranks **all answers, anonymized** as Response A, B, C… Each reviewer sees them in a **different shuffled order**, and names and model ids are scrubbed from the text. | Yes, plus shuffling and scrubbing |
-| 2b. Deliberation | Optional, after the vote. The chairman lists the disputed points and tags each (action / claim / emphasis); the **plugin** decides from the setting whether to debate. Each seat holds or changes its position per point, with a reason; 1 or 2 rounds. | Added |
-| 3. Chairman | The chairman writes the final answer from the answers, critiques, rankings and any deliberation, and says which argument decided each disputed point. It must **keep dissent visible**. | Yes, plus dissent rule |
-| Report | Markdown + PDF: verdict, roster, ranking matrix, agreement and dissent, one page per seat, method and usage. | Added |
+| 0. Brief | Hermes frames the question and gathers an **evidence pack** (your files, numbers, short research with sources). From the page, your evidence box is the pack. | Optional |
+| 1. Answers | Every seat answers **independently and in parallel**, with its role and instructions. | Roles optional |
+| 2. Peer ranking | Every seat ranks **all answers, anonymized** as Response A, B, C… Each reviewer sees them in a **different shuffled order**, and names and model ids are scrubbed from the text. | Shuffled per reviewer |
+| 2b. Deliberation | Optional, after the vote. The chairman lists the disputed points and tags each (action / claim / emphasis); the **plugin** decides from the setting whether to debate. Each seat holds or changes its position per point, with a reason; 1 or 2 rounds. | Optional |
+| 3. Chairman | The chairman writes the final answer from the answers, critiques, rankings and any deliberation, and says which argument decided each disputed point. It must **keep dissent visible**. | Dissent kept |
+| Report | Markdown + PDF: verdict, roster, ranking matrix, agreement and dissent, one page per seat, method and usage. | Executive summary on page 1 |
 
 Each stage is its own tool call, run by plugin code, so the model cannot skip a stage or see
 identities it shouldn't, and no call gets near Hermes's 420-second tool limit.
@@ -447,7 +447,7 @@ Paragraphs containing Arabic script are set right-to-left.
 
 ### How this differs from `hermes-council`
 
-[`girayk/hermes-council`](https://github.com/girayk/hermes-council) also ports Karpathy's council.
+[`girayk/hermes-council`](https://github.com/girayk/hermes-council) is another multi-model council for Hermes.
 This is a separate implementation that uses only public plugin APIs (`ctx.llm`, tools, hooks, a
 bundled skill), adds no provider to your model menu, runs one stage per visible tool call with
 live progress and Stop, and adds per-seat roles and instructions, templates, the evidence pack,
@@ -467,6 +467,7 @@ fallback, drafts and the permission check, the reports, and the tool/hook glue.
 
 ## Credits and license
 
-- Council concept and the three-stage protocol: [karpathy/llm-council](https://github.com/karpathy/llm-council).
+- The three-stage core (independent answers, anonymous peer ranking, chairman) builds on Andrej
+  Karpathy's [llm-council](https://github.com/karpathy/llm-council).
 - Fonts: Noto Sans and Noto Naskh Arabic, SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
 - Code: MIT (see `LICENSE`).

@@ -1,4 +1,4 @@
-"""hermes-committee — Karpathy's LLM Council for Hermes Agent, with seat roles, evidence and reports.
+"""hermes-committee — a committee of AI models for hard decisions, with roles, evidence, debate and reports.
 
 Hermes surfaces used (all public): ctx.register_tool / register_hook / register_skill /
 register_cli_command, ctx.llm (per-seat provider/model, gated by the user's
@@ -157,7 +157,7 @@ OPEN_SCHEMA = {
     "description": (
         "Use when the user asks, in any words, to convene a committee or council on a question (often with "
         "attached files). "
-        "Convene a committee of AI models (Karpathy's LLM Council): seats answer a question independently, "
+        "Convene a committee of AI models: seats answer a question independently, "
         "rank each other's anonymous answers, and a chairman writes the final answer, with a Markdown and "
         "PDF report. Use only for hard, contested or high-stakes questions — it makes several model calls. "
         "Load the skill hermes-committee:convene first; it explains the full procedure. After this call, "
@@ -766,7 +766,7 @@ def register(ctx):
     except Exception:  # noqa: BLE001 - model notes are optional
         logger.debug("hermes-committee: no data dir for model notes", exc_info=True)
     ctx.register_tool(name="committee_open", toolset="committee", schema=OPEN_SCHEMA, handler=handle_open,
-                      description="Convene an AI committee (LLM Council)", emoji="🏛")
+                      description="Convene a committee of AI models", emoji="🏛")
     ctx.register_tool(name="committee_advance", toolset="committee", schema=ADVANCE_SCHEMA,
                       handler=handle_advance, description="Run the next committee stage", emoji="🏛")
     ctx.register_hook("post_tool_call", _on_post_tool_call)

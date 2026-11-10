@@ -629,7 +629,7 @@ def repair_ranking(raw: list[Any], shown: list[str]) -> tuple[list[str], bool]:
 
 
 def parse_text_ranking(text: str) -> list[str]:
-    """Karpathy-style fallback: labels in order after the last 'FINAL RANKING'."""
+    """Plain-text fallback: labels in order after the last 'FINAL RANKING'."""
     m = None
     for m in _FINAL_RE.finditer(text or ""):
         pass

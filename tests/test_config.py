@@ -9,7 +9,7 @@ def test_zero_config_is_classic_on_active_model():
     assert r["template"] == "classic"
     assert len(r["seats"]) == 4
     assert all(s["provider"] == "" and s["model"] == "" for s in r["seats"])
-    assert all(s["instructions"] == "" for s in r["seats"])      # Karpathy: no personas
+    assert all(s["instructions"] == "" for s in r["seats"])      # classic: no personas
     assert r["quorum"] == 3
     assert any("correlated" in w for w in r["warnings"])
 

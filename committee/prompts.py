@@ -1,6 +1,6 @@
 """Prompts and JSON schemas for the three stages.
 
-Anonymity rule (Karpathy): Stage-2 reviewers see only "Response A/B/C" labels — never seat
+Anonymity rule: Stage-2 reviewers see only "Response A/B/C" labels — never seat
 names, roles or model ids. The chairman sees role names (useful context) but never model ids.
 Every schema lists all properties as required (strict structured-output providers demand it);
 empty strings / lists are allowed.
