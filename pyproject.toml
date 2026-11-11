@@ -1,6 +1,6 @@
 [project]
 name = "hermes-committee"
-version = "0.4.0"
+version = "0.4.1"
 description = "A committee of AI models for hard decisions in Hermes Agent: roles, evidence, debate, live page and PDF reports."
 requires-python = ">=3.11"
 license = "MIT"

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- **No credential-store reads.** Billing detection no longer calls `hermes_cli.auth.read_credential_pool`
+  (it only looked at each saved login's type, but the call returns the whole entry). Subscription vs
+  pay-per-use now comes from Hermes's billing table, the provider list Hermes gives the Desktop page,
+  the provider's name, or your choice in the budget menu. In line with plugin catalog rule 11.
+
 ## 0.4.0
 
 - **Thinking levels per step.** The seats' answers and the verdict ask for medium reasoning; the clerical

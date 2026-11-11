@@ -6,10 +6,10 @@ list (``hostcaps``) and to the user's own choice in the budget menu.
 
 * ``price``  — Hermes's pricing tables (``agent.usage_pricing``), the same ones Hermes uses to record
   what a session cost.
-* ``billing`` — ``subscription`` when Hermes bills the route as included in a plan, when the provider
-  is a subscription by name, or when its saved login is an account sign-in (OAuth); ``paid`` for an
-  API key or a credits hub (OpenRouter, Nous Portal). Read with ``read_credential_pool``, which never
-  writes Hermes's auth store.
+* ``billing`` — ``subscription`` when Hermes bills the route as included in a plan or the provider is a
+  subscription by name; ``paid`` when Hermes bills it per use; otherwise ``None`` and the user picks in the
+  budget menu. The plugin never reads Hermes's credential store (plugin catalog rule 11), not even the
+  type of a saved login.
 """
 from __future__ import annotations
 
@@ -41,17 +41,6 @@ def billing(provider: str, model: str = "") -> Optional[str]:
         logger.debug("hermes-committee: billing route unavailable", exc_info=True)
     if "subscription" in slug:
         return "subscription"
-    try:
-        from hermes_cli.auth import read_credential_pool
-        entries = read_credential_pool(slug)
-    except Exception:  # noqa: BLE001
-        logger.debug("hermes-committee: credential pool unavailable", exc_info=True)
-        return None
-    kinds = {str((e or {}).get("auth_type") or "api_key").lower() for e in entries or [] if isinstance(e, dict)}
-    if "oauth" in kinds:
-        return "subscription"
-    if kinds:
-        return "paid"
     return None
 
 
