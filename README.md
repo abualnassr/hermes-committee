@@ -10,8 +10,8 @@ decision, its dissent, next actions and a PDF report.
 
 | 1 · Brief | 2 · Convene | 3 · Decision |
 |---|---|---|
-| [![The brief: question, evidence and the committee's seats](docs/images/brief.png)](docs/images/brief.png) | [![Convene: the seats on an arc, the chairman's bench, stages, timeline and live log](docs/images/convene.png)](docs/images/convene.png) | [![Decision: the ruling, figures, next actions with owners, and how the table stood](docs/images/decision.png)](docs/images/decision.png) |
-| Ask, add evidence, pick a model and instructions for each seat. | Watch the answers, the blind vote and the debate as they happen. | The verdict, its confidence, next actions, dissent and the ranking. |
+| [![The brief: question, evidence, Research first, and the committee's seats with one open for editing](docs/images/brief.png)](docs/images/brief.png) | [![Convene: the evidence box with files and web sources over the table, seats on an arc debating, the chairman's bench, timeline and live log](docs/images/convene.png)](docs/images/convene.png) | [![Decision: the ruling, figures, next actions with owners, and how the table stood](docs/images/decision.png)](docs/images/decision.png) |
+| Ask, add evidence, switch on Research first, and give each seat a model, instructions and a thinking level. | Watch the research, the answers, the blind vote and the debate as they happen. | The verdict, its confidence, next actions, dissent and the ranking. |
 
 <sub>Screenshots use an invented example and invented model names.</sub>
 
