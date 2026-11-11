@@ -22,3 +22,6 @@ samples/
 
 # Private plans
 .hermes/
+
+# Launch video output (/brag)
+brag-output*/
