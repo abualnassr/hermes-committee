@@ -36,6 +36,10 @@ class ConfigError(ValueError):
     """A request or preset that cannot be turned into a valid roster."""
 
 
+# How long a model thinks before it answers. "default" sends nothing: the provider's own default.
+THINKING = ("default", "low", "medium", "high")
+
+
 def _slot(raw: Any) -> dict[str, str]:
     raw = raw if isinstance(raw, dict) else {}
     provider = str(raw.get("provider") or "").strip()
@@ -45,6 +49,8 @@ def _slot(raw: Any) -> dict[str, str]:
     out = {"provider": provider, "model": model}
     if isinstance(raw.get("vision"), bool):           # seat editor: 'Can see photos' / 'Descriptions only'
         out["vision"] = raw["vision"]
+    if str(raw.get("thinking") or "").lower() in THINKING:   # seat editor / chairman row: 'Thinking'
+        out["thinking"] = str(raw["thinking"]).lower()
     return out
 
 
@@ -58,12 +64,18 @@ def model_label(slot: dict[str, Any]) -> str:
     return "active model"
 
 
+def _research_cap(v: Any) -> int:
+    from . import research as _r
+    return _r.cap_of(v)
+
+
 def build_roster(settings: dict[str, Any] | None, *, preset: str | None = None, template: str | None = None,
                  seats: list[dict[str, Any]] | None = None, review: bool | None = None,
                  chairman: dict[str, Any] | None = None, exact: bool = False,
                  max_minutes: int | float | None = None, max_usd: int | float | None = None,
                  deliberate: str | None = None, deliberate_rounds: int | None = None,
-                 chairman_guidance: str | None = None, decision_focus: bool | None = None) -> dict[str, Any]:
+                 chairman_guidance: str | None = None, decision_focus: bool | None = None,
+                 research: bool | None = None, research_secs: int | float | None = None) -> dict[str, Any]:
     """Resolve the committee for one run. Raises ConfigError with a user-facing message."""
     settings = settings if isinstance(settings, dict) else {}
     presets = settings.get("presets") if isinstance(settings.get("presets"), dict) else {}
@@ -160,6 +172,8 @@ def build_roster(settings: dict[str, Any] | None, *, preset: str | None = None, 
         "seats": roster,
         "chairman": chairman,
         "review": do_review,
+        "research": research if isinstance(research, bool) else bool(p.get("research", False)),
+        "research_secs": _research_cap(research_secs if research_secs not in (None, "") else p.get("research_secs")),
         "deliberate": delib,
         "deliberate_rounds": int(rounds),
         "quorum": quorum,
@@ -175,5 +189,6 @@ def planned_calls(roster: dict[str, Any]) -> dict[str, int]:
     review = n if roster["review"] else 0
     pictures = len((roster.get("evidence_index") or {}).get("images") or [])
     delib = (1 + n * (roster.get("deliberate_rounds") or 1)) if (roster.get("deliberate") or "never") != "never" else 0
-    return {"describe": pictures, "stage1": n, "review": review, "deliberate": delib, "chairman": 1,
-            "total": pictures + n + review + 1, "total_if_debate": pictures + n + review + 1 + delib}
+    web = 2 if roster.get("research") else 0
+    return {"research": web, "describe": pictures, "stage1": n, "review": review, "deliberate": delib, "chairman": 1,
+            "total": web + pictures + n + review + 1, "total_if_debate": web + pictures + n + review + 1 + delib}

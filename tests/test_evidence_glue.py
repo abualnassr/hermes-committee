@@ -94,7 +94,7 @@ def test_advance_loads_the_evidence_for_the_seats(plugin, tmp_path):
     assert texts and all("[E1] notes.md" in t and "92 °C" in t for t in texts)
 
 
-def test_draft_keeps_page_choices_and_adds_chat_files(plugin, tmp_path):
+def test_draft_keeps_page_choices_and_ignores_agent_files(plugin, tmp_path):
     mod, _ctx = plugin
     pid = store.new_pack(tmp_path)
     store.add_to_pack(tmp_path, pid, "page.md", b"from the page")
@@ -106,4 +106,5 @@ def test_draft_keeps_page_choices_and_adds_chat_files(plugin, tmp_path):
     out = json.loads(mod.handle_open({"draft": none_ticked, "evidence_files": [str(chat)]}, session_id="s1"))
     assert out["ok"], out
     run = store.load(tmp_path, out["run_id"])
-    assert [f["name"] for f in run["files"]] == ["chat.md"]      # unticked page file left out; chat file added
+    assert not run.get("files")                                  # unticked page file left out; the agent's file ignored
+    assert run["agent_added_ignored"] == ["files"]

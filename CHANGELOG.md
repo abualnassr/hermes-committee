@@ -1,6 +1,67 @@
 # Changelog
 
-## 0.3.0 (in progress)
+## 0.4.0
+
+- **Thinking levels per step.** The seats' answers and the verdict ask for medium reasoning; the clerical
+  steps (searches, passages, photo notes, blind vote, the dispute list, debate replies) ask for low. A seat's
+  *Thinking for the answer* and the chairman's *Thinking for the verdict* change their own step (Low, Medium,
+  High, Model default). The level rides on three plugin auxiliary tasks, so the seat's provider and model are
+  unchanged; a provider that rejects the level is retried without it and remembered. Each call's level is in
+  the run record, and Time & cost shows it per seat. With a reasoning-heavy chairman, listing the
+  disputes took 45 s instead of 229 s in one test.
+- **Research works on a multi-profile gateway.** The parallel searches and page reads now run in a copy of
+  the caller's context, so Hermes's web tools can read the profile's search and extract keys. Before, a
+  gateway serving more than one profile refused those reads in the worker threads, every page came back
+  unread and the committee ran with no web sources. When pages cannot be read, the note now gives the
+  real reason instead of a bare "could not be read".
+- **Only what you give reaches the seats.** A run convened from the page now uses exactly the page's
+  question, evidence and files; a brief, evidence text or files the chat agent adds are ignored (and
+  noted in the run). Before, the agent could add facts from its memory of the user to the brief,
+  and they went to every seat's provider. The convene skill and the tool description tell the agent
+  never to add facts from memory in chat runs either, and the Decision page shows any background
+  the seats got, under the question.
+- **Seats keep to their roles.** A seat's instructions now come first, as their own block, with one
+  rule: stay within your role and say in one line when a point falls outside it. The answer fields
+  for risks and evidence gaps accept "outside my role", so the fixed answer format no longer pulls
+  every seat toward the same coverage. The debate uses the same block. No extra calls.
+- **The chairman sees the roles** and weighs each view mainly within its role, and notes what no
+  member covered. The blind vote still sees no roles (they would reveal the author).
+- **Role-fit note.** In the same verdict call the chairman marks each seat with instructions as kept
+  or drifted, with a reason: an amber "!" on the seat in "How the table stood", a tag in "Answers
+  ranked", a line in the seat's answer and in the Markdown and PDF reports. Optional: a verdict
+  without it still works.
+- **Research first** (off by default; saved with a committee; `research: true` in chat,
+  `--research` in the terminal). Before the seats answer, the chairman's model writes 2–4 searches;
+  Hermes's own `web_search` and `web_extract` tools (the search provider you set up) find and read
+  up to 6 pages (one per site first), all searches at once; the plugin splits each page into numbered
+  passages and the chairman's model picks up to 8 by number, so the text always comes word for word
+  from the page and the same passage cannot appear twice. At most 2 per site and about 2,300 tokens
+  in all. They join the evidence as [W1]… with title, site and date, marked unverified and
+  untrusted for every seat, the vote and the chairman. Only the question and evidence file names are
+  used for the searches; file contents never leave. Page runs pause up to 30 s for a source review
+  (untick any; no answer keeps all; paused time does not count). **Time allowed** for research is
+  your choice (45 s, 1½ min by default, or 2½ min; `research_secs`, `--research-secs`), saved with
+  the committee: research stops there and the committee goes on with what it found. Research counts
+  against the time limit and budget; it is skipped with a note when it does not fit. Every failure (no search
+  provider, nothing found, pages blocked) is soft: the committee goes on from your evidence. New
+  Research step and teal timeline bar on the Convene page, a Web sources tab on the Decision page,
+  and a web sources list in the reports.
+- **The table shows where the evidence goes.** The Convene table is redrawn: seats with glowing
+  progress rings, curved spokes that light up while a seat works, an answer's first line beside the
+  seat when it lands, ballots as diamonds, the chairman's bench filling as it writes, and the decision
+  under the bench with a ripple. An evidence box sits over the table, in page text so it stays
+  readable at any window size: your files, photos and typed notes as pills, web sources in a second
+  row (they rise from the chairman's bench when research finishes), "+N more" when there are many. Every model call that takes evidence
+  draws it from the box's outlet: each seat for its answer and its ballot, the debating seats for each
+  reply, the chairman for the agenda and the verdict. Only real calls animate. While the chairman
+  writes, the seats dim and say "waiting for the verdict"; seats outside a debate say "not in the
+  debate".
+- **One button system.** Every button on the page is one of six kinds (main, secondary, tinted,
+  quiet, danger, choice chip) in one outlined style that lights up in the theme accent, with a
+  keyboard focus ring, a neutral disabled state and a spinner while convening. Reduced motion turns
+  the sheen and pill animations off.
+
+## 0.3.0
 
 - **New Committee page: Brief, Convene, Decision.** Three steps along the top.
   *Brief*: the question and evidence on the left; on the right the committee type, a small table

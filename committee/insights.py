@@ -235,7 +235,9 @@ def _events(run: dict[str, Any], *names: str) -> list[dict[str, Any]]:
 def stage_starts(run: dict[str, Any]) -> dict[str, float]:
     """Seconds after opening at which each stage began (a stage begins when the one before it ended)."""
     t0, out = _t0(run), {}
-    desc = _events(run, "describe")
+    desc = _events(run, "describe", "research")
+    if run.get("research"):
+        out["research"] = 0.0
     out["stage1"] = (desc[-1]["t"] if desc else t0) - t0
     s1 = _events(run, "stage1")
     if s1:
@@ -253,6 +255,8 @@ def stage_starts(run: dict[str, Any]) -> dict[str, float]:
         st = live["stage"]
         if st == "deliberate":
             out.setdefault("deliberate", live["started"] - t0)
+        elif live.get("researching") is not None or live.get("sources"):
+            pass                                            # still before the answers
         else:
             out[st] = live["started"] - t0                  # the running stage: exact
     return {k: round(max(0.0, v), 1) for k, v in out.items()}
@@ -294,7 +298,10 @@ def lanes(run: dict[str, Any]) -> list[dict[str, Any]]:
         seats = run.get("seats") or []
         ok = [lab for lab, a in (run.get("answers") or {}).items() if a.get("status") == "ok"]
         done = live.get("done") or {}
-        if st == "stage1":
+        if st == "stage1" and (live.get("researching") or live.get("sources")):
+            want = {"chair": "research"} if live.get("researching") else {}
+            st = "research"
+        elif st == "stage1":
             want = {s["label"]: s["label"] for s in seats}                       # label -> key in live.done
         elif st == "review":
             want = {lab: lab for lab in ok}
@@ -404,6 +411,14 @@ def event_log(run: dict[str, Any]) -> list[dict[str, Any]]:
             ev.append({"t": t, "kind": "verdict", "who": "Chairman",
                        "text": f"decided · {c.get('confidence') or ''} confidence".replace(" ·  ", " · "),
                        "quote": c.get("decision") or ""})
+        elif kind == "research":
+            web = run.get("web") or {}
+            n = len(web.get("items") or [])
+            ev.append({"t": t, "kind": "ranking" if n else "skip", "who": "Research", "quote": "" if n else web.get("note", ""),
+                       "text": (f"{n} web source{'s' if n != 1 else ''} added" + (f" · {e.get('dropped')} unticked" if e.get("dropped") else ""))
+                       if n else "no web sources"})
+        elif kind == "sources_ask":
+            ev.append({"t": t, "kind": "skip", "who": "", "text": f"paused · review the {e.get('items')} web sources", "quote": ""})
         elif kind == "cancelled":
             ev.append({"t": t, "kind": "stop", "who": "", "text": "stopped", "quote": ""})
         elif kind == "limit_ask":
@@ -472,6 +487,8 @@ def public_run(run: dict[str, Any], history: Optional[list[dict[str, Any]]] = No
         es = exec_summary(run)
         out["exec"] = {k: es.get(k) for k in ("bottom_line", "reasons", "change", "assembled")} if es["ok"] else None
     out["summary"] = summary(run)
+    from .followup import own_brief
+    out["background"] = own_brief(run)
     out["insights"] = run_insights(run) if run.get("status") == "done" else []
     out["matrix"] = ballot_matrix(run)
     out["lanes"] = lanes(run)

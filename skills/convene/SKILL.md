@@ -17,18 +17,20 @@ the user already set up the committee on the Committee page: question, seats, mo
 and evidence are stored in that draft.
 
 - Do **not** ask clarifying questions and do **not** change the seats or models.
-- You may add a short `brief` from the conversation, and evidence only if the user attached files
-  or pasted data in this chat (files as `evidence_paths`, pasted data as `evidence`). Files added
-  on the page are already in the draft; do not pass them again.
-- Call `committee_open` with `draft` set to the id (plus `brief`/`evidence` if you added any),
-  then continue with step 4 below.
+- Do **not** add a `brief`, `evidence` or files: the plugin uses exactly what is on the page and
+  ignores them. Never add facts about the user from memory.
+- Call `committee_open` with only `draft` set to the id, then continue with step 4 below.
 
 ## 1. Frame the question
 
 - Take the question from the user's message (text after the command, or the conversation).
 - If the question is too vague to answer well (no options, no goal, no context), ask **one**
   short clarifying question first. Otherwise proceed — do not interrogate the user.
-- Write a **brief**: goal, constraints, decision criteria, and anything the user already said.
+- Write a **brief**: goal, constraints, decision criteria, and anything the user already said
+  **in this conversation**. Never add facts from your memory or profile of the user (their hardware,
+  employer, projects, location, preferences) or from other sessions, unless the user asks you to:
+  the brief goes to every seat's provider. The Decision page shows the brief to the user as
+  "Background given to the seats".
 
 ## 2. Build the evidence pack
 
@@ -44,8 +46,10 @@ what makes the answers grounded:
   (a seat whose model refuses the picture is retried with the description). If `committee_open`
   reports that every model refused pictures before, tell the user and ask whether to drop the photos or change a seat's model.
 - Include other facts the user supplied (numbers, logs, prior messages) in `evidence`.
-- If the question depends on current or external facts and you have research tools, do a
-  short, focused search and paste the relevant excerpts **with their sources**.
+- If the question depends on current or external facts, pass `research: true`: the plugin runs
+  one web search before the seats answer and adds checked passages with their sources ([W1]…).
+  Do not also search yourself. Without that argument (older versions), do a short, focused search
+  and paste the relevant excerpts **with their sources**.
 - Never invent evidence. If something important is unknown, say so in the pack.
 - Keep it under ~15,000 characters; summarize long documents and keep key numbers verbatim.
 

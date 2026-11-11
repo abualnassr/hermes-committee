@@ -12,6 +12,7 @@ on_session_end hooks; no new model calls start after that.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import threading
@@ -59,6 +60,29 @@ def _usage(u: Any) -> dict[str, Any]:
     return {k: getattr(u, k, None) for k in ("input_tokens", "output_tokens", "cost_usd")}
 
 
+# Thinking levels ride on auxiliary tasks this plugin registers (Hermes folds a task's reasoning_effort into
+# the call). Filled by register(); empty on a Hermes without plugin tasks, and calls then go out as before.
+_THINK_LEVELS = ("low", "medium", "high")
+_THINK_TASKS: dict[str, str] = {}
+
+
+def _register_thinking(ctx) -> None:
+    reg = getattr(ctx, "register_auxiliary_task", None)
+    if not callable(reg):
+        return
+    for level in _THINK_LEVELS:
+        key = f"committee_think_{level}"
+        try:
+            reg(key, display_name=f"Committee: {level} thinking",
+                description=(f"Used by hermes-committee for calls set to {level} thinking. The committee picks "
+                             "each seat's provider and model itself; only the reasoning level comes from here."),
+                defaults={"reasoning_effort": level})
+        except Exception:  # noqa: BLE001 - thinking levels are optional; the run works without them
+            logger.debug("hermes-committee: could not register %s", key, exc_info=True)
+            continue
+        _THINK_TASKS[level] = key
+
+
 class _HermesLLM:
     """engine.LLM on top of ctx.llm. Provider/model are only passed when the seat sets them,
     so an unconfigured seat runs on the user's active model with no override needed."""
@@ -67,24 +91,61 @@ class _HermesLLM:
         self.ctx = ctx
 
     @staticmethod
-    def _route(provider: str, model: str) -> dict[str, str]:
-        return {k: v for k, v in (("provider", provider), ("model", model)) if v}
+    def _route(provider: str, model: str, thinking: str = "default") -> dict[str, str]:
+        """Provider/model override, plus the plugin's own auxiliary task for a thinking level. Hermes applies
+        that task's ``reasoning_effort`` to the call; the seat's provider and model still choose the model.
+        A task with no explicit model would fall back to the task's own routing, so an unset seat gets the
+        active model spelled out."""
+        out = {k: v for k, v in (("provider", provider), ("model", model)) if v}
+        task = _THINK_TASKS.get(thinking)
+        if task:
+            if not (provider and model):
+                from .committee import hostcaps
+                ap, am = hostcaps.active_route()
+                full = {"provider": provider or ap, "model": model or am}
+                if full["provider"] and full["model"]:
+                    out = full
+            if out.get("provider") and out.get("model"):
+                out["task"] = task
+        return out
 
     def structured(self, *, provider, model, instructions, text, schema, schema_name, max_tokens, timeout, purpose,
-                   images=()):
+                   images=(), thinking="default"):
         blocks = [{"type": "text", "text": text}] + [
             {"type": "image", "data": i["data"], "mime_type": i.get("mime_type") or "image/jpeg"} for i in images or ()]
         r = self.ctx.llm.complete_structured(
             instructions=instructions, input=blocks, json_schema=schema,
             schema_name=schema_name, max_tokens=max_tokens, timeout=timeout, purpose=purpose,
-            **self._route(provider, model))
+            **self._route(provider, model, thinking))
         return Reply(content_type=r.content_type, parsed=r.parsed, text=r.text or "", usage=_usage(r.usage),
                      provider=getattr(r, "provider", "") or "", model=getattr(r, "model", "") or "")
 
-    def text(self, *, provider, model, instructions, text, max_tokens, timeout, purpose):
+    # Research first: Hermes's own web tools (the search provider the user set up), dispatched by the plugin.
+    def _tool(self, name: str, args: dict) -> str:
+        dispatch = getattr(self.ctx, "dispatch_tool", None)
+        if not callable(dispatch):
+            return json.dumps({"error": "this Hermes version has no plugin tool dispatch"})
+        try:
+            out = dispatch(name, args)
+            if "Unknown tool" in str(out)[:200]:
+                # `hermes committee run` (a terminal command) does not load Hermes's tools the way a chat
+                # does; load the built-in ones once and try again. Chat and page runs never get here.
+                import model_tools  # noqa: F401  (Hermes: registers the built-in tools)
+                out = dispatch(name, args)
+        except Exception as exc:  # noqa: BLE001 - research is optional; the run goes on without it
+            return json.dumps({"error": f"{name} failed: {exc}"[:300]})
+        return out if isinstance(out, str) else json.dumps(out, default=str)
+
+    def web_search(self, query: str, limit: int) -> str:
+        return self._tool("web_search", {"query": query, "limit": int(limit)})
+
+    def web_extract(self, urls: list) -> str:
+        return self._tool("web_extract", {"urls": list(urls)})
+
+    def text(self, *, provider, model, instructions, text, max_tokens, timeout, purpose, thinking="default"):
         r = self.ctx.llm.complete(
             messages=[{"role": "system", "content": instructions}, {"role": "user", "content": text}],
-            max_tokens=max_tokens, timeout=timeout, purpose=purpose, **self._route(provider, model))
+            max_tokens=max_tokens, timeout=timeout, purpose=purpose, **self._route(provider, model, thinking))
         return Reply(content_type="text", text=r.text or "", usage=_usage(r.usage),
                      provider=getattr(r, "provider", "") or "", model=getattr(r, "model", "") or "")
 
@@ -166,16 +227,28 @@ OPEN_SCHEMA = {
         "type": "object",
         "properties": {
             "question": {"type": "string", "description": "The question exactly as the committee should answer it."},
-            "brief": {"type": "string", "description": "Context, constraints and decision criteria from the user."},
+            "brief": {"type": "string", "description":
+                      "Context, constraints and decision criteria the user stated in this conversation. Never add "
+                      "facts from your memory or profile of the user, or from other sessions, unless the user asks: "
+                      "the brief goes to every seat's provider. Ignored when `draft` is given."},
             "evidence": {"type": "string", "description": "Evidence pack (facts, data, excerpts with sources) every seat must use."},
             "preset": {"type": "string", "description": "Named preset from the user's settings. Omit for the default."},
             "template": {"type": "string", "description": "Template id: classic, expert-panel, decision-board, red-team, reliability-board."},
             "seats": {"type": "array", "description": "Custom seats when the user names the roles. Models come from the preset by position.",
                       "items": {"type": "object", "properties": {
                           "name": {"type": "string"}, "instructions": {"type": "string"},
-                          "provider": {"type": "string"}, "model": {"type": "string"}},
+                          "provider": {"type": "string"}, "model": {"type": "string"},
+                          "thinking": {"type": "string", "enum": ["default", "low", "medium", "high"],
+                                       "description": "How long this seat thinks before answering. Omit for medium."}},
                           "required": ["name"]}},
             "review": {"type": "boolean", "description": "Run the anonymous peer-ranking stage (default true)."},
+            "research": {"type": "boolean", "description":
+                         "Research first: before the seats answer, search the web once (Hermes's own web search) "
+                         "and add short passages with their sources to the evidence, shared by every seat. Use it "
+                         "when the question depends on current facts, prices, standards or recent events. Only the "
+                         "question is sent to the search provider, never the files. Default false."},
+            "research_secs": {"type": "integer", "enum": [45, 90, 150], "description":
+                              "Most seconds Research first may take (not counting the source review). Default 90."},
             "deliberate": {"type": "string", "enum": ["material", "action", "always", "never"],
                            "description": "Let the members debate the points they disagree on before the chairman "
                                           "decides. material (default): when they differ on the action or on a claim "
@@ -212,14 +285,18 @@ def _from_draft(args: dict) -> dict:
     if d is None:
         raise cconfig.ConfigError(f"Draft {args['draft']!r} was not found. Open the Committee page and press Convene again.")
     merged = dict(args)
-    # Files attached in the chat are paths; files added on the page are ids in the draft's pack.
+    # The page's set-up is used exactly: a brief, evidence text or files the chat agent adds are ignored,
+    # so nothing reaches the seats that the user did not put on the page (an agent could otherwise add
+    # facts from its memory of the user, and they would go to every seat's provider). Noted in the run.
     chat_paths = [*(args.get("evidence_paths") or []), *(args.get("evidence_files") or [])]
+    merged["_ignored"] = [k for k, v in (("brief", args.get("brief")), ("evidence", args.get("evidence")),
+                                         ("files", chat_paths)) if v and (str(v).strip() if isinstance(v, str) else True)]
     merged.pop("evidence_files", None)
-    merged["evidence_paths"] = chat_paths
+    merged["evidence_paths"] = []
     merged["question"] = d.get("question") or args.get("question") or ""
-    merged["evidence"] = "\n\n".join(x for x in (d.get("evidence") or "", args.get("evidence") or "") if x.strip())
-    merged["brief"] = "\n\n".join(x for x in (d.get("brief") or "", args.get("brief") or "") if x.strip())
-    for k in ("template", "seats", "chairman", "review", "deliberate", "deliberate_rounds", "chairman_guidance",
+    merged["evidence"] = d.get("evidence") or ""
+    merged["brief"] = d.get("brief") or ""
+    for k in ("template", "seats", "chairman", "review", "research", "research_secs", "deliberate", "deliberate_rounds", "chairman_guidance",
               "decision_focus", "preset", "max_minutes",
               "max_usd", "evidence_pack",
               "title", "follow_of", "follow_context", "follow_evidence"):
@@ -243,11 +320,13 @@ def _follow_source(args: dict[str, Any]) -> Optional[dict[str, Any]]:
         raise cconfig.ConfigError(f"No earlier committee {fid!r} to follow up.")
     if not args.get("seats") and not args.get("template") and not args.get("preset"):
         args["template"] = prev.get("template")
-        args["seats"] = [{k: s[k] for k in ("name", "instructions", "provider", "model", "vision") if k in s}
+        args["seats"] = [{k: s[k] for k in ("name", "instructions", "provider", "model", "vision", "thinking") if k in s}
                          for s in prev.get("seats") or []]
-        args["chairman"] = {k: v for k, v in (prev.get("chairman") or {}).items() if k in ("provider", "model")}
+        args["chairman"] = {k: v for k, v in (prev.get("chairman") or {}).items() if k in ("provider", "model", "thinking")}
         if args.get("review") is None:
             args["review"] = prev.get("review")
+        if args.get("research") is None and prev.get("research"):
+            args["research"] = True
         if prev.get("custom_brief"):
             args.setdefault("chairman_guidance", prev.get("chairman_guidance"))
             args.setdefault("decision_focus", prev.get("decision_focus"))
@@ -267,9 +346,11 @@ def _set_reserves(roster: dict[str, Any]) -> None:
         from .committee import insights
         runs = [r for r in store.all_runs(_data_dir(), limit=20) if r.get("status") == "done"]
         chair_key = cconfig.model_label(roster["chairman"])
-        chair, review = [], []
+        chair, review, answer = [], [], []
         for r in runs:
             secs = insights.stage_seconds(r)
+            if secs.get("stage1"):
+                answer.append(max(secs["stage1"].values()))
             if cconfig.model_label(r.get("chairman") or {}) == chair_key and "chair" in secs.get("chair", {}):
                 chair.append(secs["chair"]["chair"])
             if secs.get("review"):
@@ -278,6 +359,8 @@ def _set_reserves(roster: dict[str, Any]) -> None:
             lim["chair_reserve"] = int(min(300, max(60, max(chair[:5]) * 1.2)))
         if review:
             lim["review_reserve"] = int(min(300, max(60, max(review[:5]) * 1.2)))
+        if answer and roster.get("research"):
+            lim["answer_reserve"] = int(min(240, max(45, max(answer[:5]) * 1.2)))
     except Exception:  # noqa: BLE001 - reserves are an optimisation; defaults stay
         logger.debug("hermes-committee: could not size time reserves", exc_info=True)
 
@@ -408,7 +491,9 @@ def handle_open(args: dict, **kwargs) -> str:
                                       max_minutes=args.get("max_minutes"), max_usd=args.get("max_usd"),
                                       deliberate=args.get("deliberate"), deliberate_rounds=args.get("deliberate_rounds"),
                                       chairman_guidance=args.get("chairman_guidance"),
-                                      decision_focus=args.get("decision_focus"))
+                                      decision_focus=args.get("decision_focus"),
+                                      research=args.get("research") if isinstance(args.get("research"), bool) else None,
+                                      research_secs=args.get("research_secs"))
         _set_reserves(roster)
         brief = str(args.get("brief") or "")
         if prev is not None and args.get("follow_context") is not False:
@@ -417,6 +502,8 @@ def handle_open(args: dict, **kwargs) -> str:
                              evidence=str(args.get("evidence") or ""), session_id=str(kwargs.get("session_id") or ""))
         if args.get("draft"):
             run["draft"] = str(args["draft"])
+            if args.get("_ignored"):
+                run["agent_added_ignored"] = list(args["_ignored"])
         run["title"] = followup.clean_title(args.get("title"))
         prior = store.reuse_run_files(_data_dir(), prev) if prev is not None and args.get("follow_evidence") is not False else []
         _attach_evidence(run, args, prior)
@@ -434,7 +521,8 @@ def handle_open(args: dict, **kwargs) -> str:
         "template": run["template_title"], "preset": run["preset"],
         "seats": [{"name": s["name"], "model": cconfig.model_label(s)} for s in run["seats"]],
         "chairman": cconfig.model_label(run["chairman"]), "review": run["review"], "quorum": run["quorum"],
-        "deliberate": run["deliberate"], "deliberate_rounds": run["deliberate_rounds"],
+        "deliberate": run["deliberate"], "deliberate_rounds": run["deliberate_rounds"], "research": run["research"],
+        "research_secs": run.get("research_secs"),
         "planned_model_calls": cconfig.planned_calls(run), "warnings": run["warnings"],
         "evidence": _evidence_line(run),
         "budget": _budget_line(run),
@@ -612,6 +700,8 @@ def _cli_setup(sub):
                    help="Evidence file (text, PDF, Word, Excel or photo); repeat for several")
     p.add_argument("--evidence-dir", default=None, help="Folder whose supported files are all used as evidence")
     p.add_argument("--lite", action="store_true", help="Skip Stage 2 (peer ranking)")
+    p.add_argument("--research", action="store_true", help="Search the web once before the seats answer (Research first)")
+    p.add_argument("--research-secs", type=int, choices=[45, 90, 150], default=None, help="Most seconds the research may take (default 90)")
     p.add_argument("--deliberate", choices=["material", "action", "always", "never"], default=None,
                    help="Debate disputed points before the verdict (default: material)")
     p.add_argument("--rounds", type=int, choices=[1, 2], default=None, help="Deliberation rounds (default 1)")
@@ -675,7 +765,7 @@ def _cli_run(args) -> int:
         paths += sorted(str(p) for p in Path(args.evidence_dir).rglob("*")
                         if p.is_file() and p.suffix.lower() in ev.SUPPORTED_EXT)
     req = {"question": args.question, "brief": args.brief, "evidence_paths": paths, "preset": args.preset,
-           "template": args.template, "review": False if args.lite else None, "max_minutes": args.max_minutes, "max_usd": args.max_usd,
+           "template": args.template, "review": False if args.lite else None, "research": True if args.research else None, "research_secs": args.research_secs, "max_minutes": args.max_minutes, "max_usd": args.max_usd,
            "title": args.title, "follow_of": args.follow_of,
            "deliberate": getattr(args, "deliberate", None), "deliberate_rounds": getattr(args, "rounds", None)}
     opened = json.loads(handle_open({k: v for k, v in req.items() if v not in (None, "")}, session_id=""))
@@ -741,8 +831,8 @@ def _doctor(preset: str | None) -> int:
             return name, slot, False, f"{type(exc).__name__}: {exc}"
 
     print(f"Preset: {r['preset'] or '(none — template defaults on the active model)'} · {r['template_title']}")
-    with ThreadPoolExecutor(max_workers=len(slots)) as pool:
-        results = list(pool.map(ping, slots))
+    with ThreadPoolExecutor(max_workers=len(slots)) as pool:   # context copy per task: see research.py
+        results = [f.result() for f in [pool.submit(contextvars.copy_context().run, ping, it) for it in slots]]
     bad = 0
     for name, slot, ok, err in results:
         bad += not ok
@@ -765,6 +855,7 @@ def register(ctx):
         hostcaps.set_base(_data_dir())
     except Exception:  # noqa: BLE001 - model notes are optional
         logger.debug("hermes-committee: no data dir for model notes", exc_info=True)
+    _register_thinking(ctx)
     ctx.register_tool(name="committee_open", toolset="committee", schema=OPEN_SCHEMA, handler=handle_open,
                       description="Convene a committee of AI models", emoji="🏛")
     ctx.register_tool(name="committee_advance", toolset="committee", schema=ADVANCE_SCHEMA,

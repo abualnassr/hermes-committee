@@ -38,9 +38,9 @@ class FakeLLM:
             self.calls.append(kw)
 
     def structured(self, *, provider, model, instructions, text, schema, schema_name, max_tokens, timeout, purpose,
-                   images=()):
+                   images=(), thinking="default"):
         self._log(kind="structured", provider=provider, model=model, instructions=instructions, text=text,
-                  schema_name=schema_name, images=len(images or ()))
+                  schema_name=schema_name, images=len(images or ()), thinking=thinking, purpose=purpose)
         if model in self.slow:
             time.sleep(self.slow[model])
         if model in self.fail:
@@ -84,8 +84,8 @@ class FakeLLM:
                          usage=u, provider=provider, model=model)
         raise AssertionError(schema_name)
 
-    def text(self, *, provider, model, instructions, text, max_tokens, timeout, purpose):
-        self._log(kind="text", provider=provider, model=model, instructions=instructions, text=text)
+    def text(self, *, provider, model, instructions, text, max_tokens, timeout, purpose, thinking="default"):
+        self._log(kind="text", provider=provider, model=model, instructions=instructions, text=text, thinking=thinking)
         if model in self.fail:
             raise RuntimeError(f"{model} is down")
         return Reply("text", text="Plain text answer.\nFINAL RANKING:\n1. Response B\n2. Response A",
@@ -131,6 +131,7 @@ class FakeCtx:
     def __init__(self, settings, llm):
         self.settings, self.messages = settings, []
         self.tools, self.hooks, self.skills, self.cli = {}, {}, {}, {}
+        self.aux_tasks, self.task_calls = {}, []      # plugin auxiliary tasks (thinking levels) and which calls used one
         self.llm = SimpleNamespace(complete_structured=self._structured, complete=self._complete)
         self._fake = llm
 
@@ -140,8 +141,12 @@ class FakeCtx:
     def post_message(self, text):
         return FakeHandle(self.messages, text)
 
+    def register_auxiliary_task(self, key, *, display_name, description, defaults=None, inherit_from=None):
+        self.aux_tasks[key] = dict(defaults or {})
+
     def _structured(self, *, instructions, input, json_schema, schema_name, max_tokens, timeout, purpose,
-                    provider=None, model=None):
+                    provider=None, model=None, task=None):
+        self.task_calls.append((purpose, task))
         r = self._fake.structured(provider=provider or "", model=model or "", instructions=instructions,
                                   text=input[0]["text"], schema=json_schema, schema_name=schema_name,
                                   max_tokens=max_tokens, timeout=timeout, purpose=purpose,
@@ -150,7 +155,8 @@ class FakeCtx:
         return SimpleNamespace(content_type=r.content_type, parsed=r.parsed, text=r.text, usage=usage,
                                provider=provider, model=model)
 
-    def _complete(self, *, messages, max_tokens, timeout, purpose, provider=None, model=None):
+    def _complete(self, *, messages, max_tokens, timeout, purpose, provider=None, model=None, task=None):
+        self.task_calls.append((purpose, task))
         r = self._fake.text(provider=provider or "", model=model or "", instructions=messages[0]["content"],
                             text=messages[1]["content"], max_tokens=max_tokens, timeout=timeout, purpose=purpose)
         return SimpleNamespace(text=r.text, usage=None, provider=provider, model=model)

@@ -36,7 +36,7 @@ def test_seat_override_and_adhoc_seats_borrow_models(settings):
 def test_template_override_and_review_flag(settings):
     r = c.build_roster(settings, template="red-team", review=False)
     assert r["template"] == "red-team" and r["review"] is False
-    assert c.planned_calls(r) == {"describe": 0, "stage1": 4, "review": 0, "deliberate": 0, "chairman": 1, "total": 5,
+    assert c.planned_calls(r) == {"research": 0, "describe": 0, "stage1": 4, "review": 0, "deliberate": 0, "chairman": 1, "total": 5,
                                   "total_if_debate": 5}
 
 

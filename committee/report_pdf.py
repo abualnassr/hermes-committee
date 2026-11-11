@@ -42,7 +42,7 @@ DEFAULT_THEME = "slate"
 _AR = re.compile(r"[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]")
 _INLINE = [(re.compile(r"__(.+?)__"), r"\1"), (re.compile(r"`([^`]+)`"), r"\1"),
            (re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)"), r"\1 (\2)")]
-_CITE = re.compile(r"\[((?:E|I)\d+(?:\s*[,;–-]\s*(?:[EI]?\d+))*)\]")
+_CITE = re.compile(r"\[((?:E|I|W)\d+(?:\s*[,;–-]\s*(?:[EIW]?\d+))*)\]")
 STATUS = {"failed": "No verdict", "stopped": "Stopped", "running": "Running"}
 _TNUM = {"tnum": True}
 
@@ -499,6 +499,11 @@ def _method_lines(run: dict) -> list[str]:
            + ("Each seat had to end with a clear recommendation. " if run.get("decision_focus") else "")
            + f"The chairman was asked to: {run.get('chairman_guidance') or '—'}",
            "Each seat answered on its own, without seeing the others' answers."]
+    web = run.get("web") or {}
+    if run.get("research"):
+        out.insert(1, f"Research first: before the seats answered, one web search added {len(web.get('items') or [])} "
+                      "passages with their sources to the evidence, the same for every seat."
+                   if web.get("items") else f"Research first was on, but no web sources were added: {web.get('note') or 'not run'}")
     out.append("Then each seat ranked the others' answers without knowing who wrote them (the blind vote)."
                if run.get("review") else "There was no blind vote.")
     d = run.get("deliberation") or {}
@@ -604,7 +609,7 @@ def _deliberation(w: _W, run: dict, d: dict, chair: dict):
             word = stance_word(r, pos["side"])
             said = (r or {}).get("argument") or ""
             ev = "".join(f" [{e}]" for e in (r or {}).get("evidence") or []
-                         if re.fullmatch(r"[EI]\d+", e) and not re.search(rf"\b{e}\b", said))   # not cited twice
+                         if re.fullmatch(r"[EIW]\d+", e) and not re.search(rf"\b{e}\b", said))   # not cited twice
             w.item("•", f"**{pos['seat']}** ({pos['side']}{moved}; {word}). {(r or {}).get('argument') or pos['view']}{ev}",
                    after=1.4)
         x = decided.get(p["id"])
@@ -904,6 +909,10 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
         if chair.get("open_questions"):
             w.heading("Open questions")
             w.bullets(chair["open_questions"])
+        drifted = [x for x in chair.get("role_fit") or [] if x.get("fit") == "drifted"]
+        if drifted:
+            w.heading("Drifted from role")
+            w.bullets([f"{x['seat']}: {x['note']}" if x.get("note") else x["seat"] for x in drifted])
         w.section("The chairman's full reasoning", new_page=True)
         w.markdown(chair["final_answer"])
 
@@ -922,6 +931,10 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
         if s.get("instructions"):
             w.heading("Instructions given", above=1)
             w.para(s["instructions"], color=MUTED)
+            rf = next((x for x in (run.get("chair") or {}).get("role_fit") or [] if x.get("label") == s["label"]), None)
+            if rf:
+                w.para(f"Role (chairman's note): {'drifted' if rf['fit'] == 'drifted' else 'kept to it'}"
+                       + (f" · {rf['note']}" if rf.get("note") else ""), color=MUTED)
         if a.get("status") != "ok":
             w.para(f"Did not answer: {a.get('error', 'not run')}", bold=True)
             continue
@@ -946,7 +959,8 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
     # ── appendix B: evidence ─────────────────────────────────────────────────
     ev_start = None
     background = own_brief(run)
-    if run.get("files") or run.get("evidence") or background:
+    web = run.get("web") or {}
+    if run.get("files") or run.get("evidence") or background or web.get("items"):
         w.section("Appendix B · Evidence", new_page=True)
         ev_start = pdf.page_no()
         if run.get("files"):
@@ -967,6 +981,14 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
                     desc = img.get("description") or f"Not described: {img.get('describe_error') or 'unknown'}"
                     by = f" (described by {img['described_by'].split(' / ')[-1]})" if img.get("described_by") else ""
                     w.item("•", f"**[{img['id']}] {img['source']}{where}.** {desc}{by}", after=2.4)
+        if web.get("items"):
+            w.heading("Web sources (Research first)")
+            w.para("Found by one web search before the seats answered; every seat got the same passages, cited as "
+                   "[W1], [W2]…. Unverified" + (f"; accessed {web['accessed']}" if web.get("accessed") else "") + ".",
+                   size=SMALL, color=MUTED, after=2)
+            for x in web["items"]:
+                quote = x["excerpt"] if len(x["excerpt"]) <= 420 else x["excerpt"][:417].rsplit(" ", 1)[0] + "…"
+                w.item("•", f"**[{x['id']}] {x['title']}** · {x['site']}. “{quote}” {x['url']}", after=2.4)
         if run.get("evidence"):
             w.heading("Evidence typed in")
             w.markdown(run["evidence"])

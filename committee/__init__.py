@@ -4,4 +4,4 @@ The Hermes-facing glue (tools, hooks, ctx.llm adapter, progress messages) lives 
 plugin's top-level ``__init__.py``.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

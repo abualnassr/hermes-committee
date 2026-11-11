@@ -30,7 +30,8 @@ def save(base: Path, run: dict[str, Any]) -> Path:
 
 
 _DRAFT_RE = re.compile(r"^d[0-9a-f]{10}$")
-DRAFT_FIELDS = ("question", "brief", "evidence", "template", "preset", "seats", "chairman", "review", "deliberate",
+DRAFT_FIELDS = ("question", "brief", "evidence", "template", "preset", "seats", "chairman", "review", "research", "research_secs",
+                "deliberate",
                 "chairman_guidance", "decision_focus",
                 "deliberate_rounds", "max_minutes",
                 "evidence_pack", "evidence_files", "max_usd", "allow_unknown_price", "title", "follow_of",

@@ -159,6 +159,27 @@ async def extend(run_id: str, body: dict):
     return {"ok": True, "id": req["id"]}
 
 
+@router.post("/runs/{run_id}/sources")
+async def keep_sources(run_id: str, body: dict):
+    """Answer the source review after Research first: {keep: ["W1", "W3", ...]} (the ticked ones)."""
+    import uuid
+    store, _i, _t, _c = _mods()
+    base = _base()
+    try:
+        run = store.load(base, run_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if run is None:
+        raise HTTPException(404, f"No run {run_id}")
+    if not ((run.get("live") or {}).get("sources")):
+        return {"ok": False, "note": "The run is not waiting for a source review."}
+    keep = (body or {}).get("keep")
+    if not isinstance(keep, list) or not all(isinstance(x, str) and len(x) <= 8 for x in keep) or len(keep) > 40:
+        raise HTTPException(400, "keep must be a list of source ids such as 'W1'")
+    store.add_request(base, run_id, {"id": uuid.uuid4().hex[:12], "kind": "sources", "keep": keep, "t": time.time()})
+    return {"ok": True}
+
+
 @router.post("/runs/{run_id}/stop")
 async def stop(run_id: str):
     """Stop a live run from the page. A run that nobody is advancing any more (its chat turn
@@ -252,7 +273,9 @@ async def create_draft(body: dict):
                                      max_minutes=body.get("max_minutes"), max_usd=body.get("max_usd"),
                                      deliberate=body.get("deliberate"), deliberate_rounds=body.get("deliberate_rounds"),
                                      chairman_guidance=body.get("chairman_guidance"),
-                                     decision_focus=body.get("decision_focus"))
+                                     decision_focus=body.get("decision_focus"),
+                                     research=body.get("research") if isinstance(body.get("research"), bool) else None,
+                                     research_secs=body.get("research_secs"))
     except cfgmod.ConfigError as exc:
         raise HTTPException(400, str(exc))
     gate = _gate(entry, [*roster["seats"], roster["chairman"]])
@@ -317,10 +340,11 @@ async def setup():
             rosters[name] = {"template": r["template"], "review": r["review"], "chairman": r["chairman"],
                              "deliberate": r["deliberate"], "deliberate_rounds": r["deliberate_rounds"],
                              "chairman_guidance": r["chairman_guidance"], "decision_focus": r["decision_focus"],
+                             "research": r["research"], "research_secs": r["research_secs"],
                              "max_minutes": (presets[name] or {}).get("max_minutes"),
                              "max_usd": (presets[name] or {}).get("max_usd"), "source": sources.get(name),
-                             "seats": [{k: s[k] for k in ("name", "instructions", "provider", "model")}
-                                       for s in r["seats"]]}
+                             "seats": [{k: s[k] for k in ("name", "instructions", "provider", "model", "vision", "thinking")
+                                        if k in s} for s in r["seats"]]}
         except cfgmod.ConfigError as exc:
             rosters[name] = {"error": str(exc)}
     default = settings.get("default_preset") or ""
@@ -560,7 +584,9 @@ async def estimate(body: dict):
                                      max_minutes=body.get("max_minutes"), max_usd=body.get("max_usd"),
                                      deliberate=body.get("deliberate"), deliberate_rounds=body.get("deliberate_rounds"),
                                      chairman_guidance=body.get("chairman_guidance"),
-                                     decision_focus=body.get("decision_focus"))
+                                     decision_focus=body.get("decision_focus"),
+                                     research=body.get("research") if isinstance(body.get("research"), bool) else None,
+                                     research_secs=body.get("research_secs"))
     except cfgmod.ConfigError as exc:
         return {"error": str(exc)}
     return _estimate_for(body, roster, settings)

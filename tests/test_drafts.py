@@ -82,7 +82,43 @@ def test_convene_from_a_draft_uses_the_page_roster(plugin, tmp_path):
     run = store.load(tmp_path, out["run_id"])
     assert run["question"] == "Page question?" and run["draft"] == did and run["review"] is False
     assert [s["name"] for s in run["seats"]] == ["Engineer", "Skeptic"]
-    assert run["chairman"]["model"] == "m-two" and "page facts" in run["evidence"] and run["brief"] == "from chat"
+    assert run["chairman"]["model"] == "m-two" and run["evidence"] == "page facts"
+    assert run["brief"] == "" and run["agent_added_ignored"] == ["brief"]       # the page is used exactly
+
+
+def test_a_page_run_ignores_what_the_chat_agent_adds(plugin, tmp_path):
+    """An agent could add facts from its memory of the user; they must not reach the seats."""
+    mod, ctx = plugin
+    did = store.save_draft(tmp_path, {"question": "Best free model for HTML games?", "template": "classic",
+                                      "review": False, "seats": SEATS, "chairman": CHAIR})
+    extra = tmp_path / "notes.txt"
+    extra.write_text("private notes", encoding="utf-8")
+    out = json.loads(mod.handle_open({"draft": did, "brief": "User manages a team of twelve.",
+                                      "evidence": "User works at Example Corp.", "evidence_paths": [str(extra)]},
+                                     session_id="s9"))
+    assert out["ok"] is True
+    run = store.load(tmp_path, out["run_id"])
+    assert run["brief"] == "" and run["evidence"] == "" and not run.get("files")
+    assert run["agent_added_ignored"] == ["brief", "evidence", "files"]
+    while json.loads(mod.handle_advance({"run_id": out["run_id"]}, session_id="s9")).get("next_stage"):
+        pass
+    sent = json.dumps([c.get("text", "") + c.get("instructions", "") for c in ctx.llm_calls]) if hasattr(ctx, "llm_calls") else ""
+    assert "twelve" not in json.dumps(store.load(tmp_path, out["run_id"])["usage"]) and "twelve" not in sent
+
+
+def test_chat_brief_is_shown_as_background(plugin, tmp_path):
+    from committee import insights
+    mod, _ctx = plugin
+    out = json.loads(mod.handle_open({"question": "q?", "brief": "Budget is fixed at 10k.", "template": "classic"},
+                                     session_id="s1"))
+    run = store.load(tmp_path, out["run_id"])
+    assert insights.public_run(run, [])["background"] == "Budget is fixed at 10k."
+
+
+def test_tool_and_skill_forbid_facts_from_memory():
+    import pathlib as pl
+    skill = (pl.Path(__file__).parent.parent / "skills" / "convene" / "SKILL.md").read_text(encoding="utf-8")
+    assert "Never add facts from your memory" in skill and "ignores them" in skill
 
 
 def test_unknown_or_malformed_draft_is_a_plain_error(plugin):
@@ -99,3 +135,17 @@ def test_chairman_override_in_roster(settings):
     assert c.build_roster(settings, chairman=None)["chairman"]["provider"] == "p-chair"
     empty = c.build_roster(settings, chairman={})["chairman"]
     assert not empty.get("provider") and not empty.get("model")
+
+
+@pytest.mark.parametrize("on", [True, False])
+def test_research_switch_survives_page_to_draft_to_run(monkeypatch, tmp_path, settings, plugin, on):
+    """The page's Research first switch must reach the run (the draft keeps only listed fields)."""
+    api = _load_api(monkeypatch, tmp_path, settings)
+    r = _post(api, {"question": "Best free model for HTML games?", "template": "classic", "review": False,
+                    "research": on, "seats": SEATS, "chairman": CHAIR})
+    assert r["ok"] is True and store.load_draft(tmp_path, r["draft"])["research"] is on
+    assert r["planned_calls"]["research"] == (2 if on else 0)
+    mod, _ctx = plugin
+    out = json.loads(mod.handle_open({"draft": r["draft"]}, session_id="s1"))
+    assert out["ok"] is True and out["research"] is on
+    assert store.load(tmp_path, out["run_id"])["research"] is on

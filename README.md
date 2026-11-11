@@ -76,12 +76,39 @@ remembers that model as text-only (📝 on the seat card) for next time. To deci
 seat and set **Photos** to *Can see photos* or *Descriptions only* (cheaper for a model you know
 is text-only).
 
+**Thinking.** Each call asks the model for a reasoning level. The seats' answers and the
+chairman's verdict use *medium*; the clerical steps (writing searches, picking passages,
+describing photos, the blind vote, listing the disputes, debate replies) use *low*. Open a seat to
+set *Thinking for the answer* to Low, Medium, High or Model default (nothing sent: the provider's
+own default); the chairman row sets *Thinking for the verdict*. Some models ignore the level; a
+provider that rejects it is called the way it was before, and the plugin remembers that. The
+levels are three auxiliary tasks the plugin registers (`committee_think_low`, `_medium`, `_high`);
+they carry only the reasoning level, the committee still picks each seat's model.
+*When to use it:* raise a seat to High for a question that needs real working out; leave the
+rest. A model whose default is heavy thinking gets much faster on these settings: in one test,
+listing the disputes took 45 s on low against 229 s on that model's default.
+
 *When to use it:* add the files the decision actually rests on (the inspection report, the trend
 export, photos of the damage) and leave the rest out. Each file goes to every seat in almost
 every call, so its token count is multiplied by about 2 × seats + 1: a 20,000-token report on a
 five-seat committee is about 220,000 input tokens per run. Add photos when the condition is
 easier to see than to describe; for numbers, a table or text export is cheaper and more exact
 than a screenshot.
+
+**🌐 Research first** (a switch under the evidence, off by default). Before the seats start, Hermes
+turns your question into a few web searches, reads the top pages and keeps up to 8 short passages
+that bear on the question, each with its source. The plugin splits each page into numbered passages
+and the model picks them by number, so every passage is word for word from its page, never repeated,
+and at most 2 come from one site. **Time allowed** (45 s, 1½ min by default, or 2½ min) caps how
+long the research may take; after that the committee goes on with what it found. Every seat gets the same passages as evidence, cited as
+**[W1], [W2]…** and marked *unverified*; the seats themselves still have no tools. On a run from the
+page, the run then pauses up to 30 s with the sources listed, all ticked: untick any you do not
+trust and press **Continue** (paused time does not count). It uses the web search you set up in
+Hermes, costs 2 calls on the chairman's model, and adds about 2,300 tokens to each seat's input.
+Only your question goes to the search provider, never your files. The sources are listed on the
+Decision page (**Web sources** tab) and in the report.
+*When to use it:* questions that depend on current facts, prices, standards or recent events.
+Leave it off for your own data and internal decisions.
 
 ### 4. Pick your committee
 
@@ -260,6 +287,17 @@ edit it, and choose whether the committee gives **an answer** or **a decision**:
 A changed brief shows "· custom brief" on the Chairman row and has a **↺ Reset** link. It is saved
 with the committee, so a saved committee works as your own committee type.
 
+### Seats keep to their roles
+
+A seat's instructions come first in what it is sent, with one rule: stay within your role, and say
+in one line when a point falls outside it instead of covering it. The chairman sees each seat's
+instructions and weighs each view mainly within its role. In the same verdict it notes, for every
+seat with instructions, whether it **kept** to its role or **drifted**; a drifted seat gets an amber
+**!** in "How the table stood" (hover for the reason) and a line in the report. The blind vote never
+sees roles, so it stays anonymous.
+*When to use it:* if a seat keeps drifting, sharpen its instructions: name what it judges and what
+it leaves to others.
+
 ### Save a committee you like
 
 Press **💾 Save committee** on the Convene bar (or on any verdict) and give it a name, for example
@@ -351,6 +389,13 @@ files, use the Committee page, where you can see each file's size and the cost b
   Under a budget, such a call is counted at its maximum cost.
 - **Evidence files go to every seat's provider too**, and photos to every provider whose model sees
   them (plus the vision model that describes them). Remove anything you would not send to all of them.
+- **Only what you give reaches the seats.** A run from the page uses exactly the page: anything the
+  chat agent tries to add (a brief, text, files) is ignored. From a chat, the agent may add a brief
+  from what you said in that chat, but never facts from its memory of you. Any background the seats
+  got is shown on the Decision page under the question (**Background given to the seats**).
+- **Research first sends your question to your web search provider** (not your files). Web pages can
+  contain text aimed at AI models; the passages are marked untrusted for every seat and the
+  chairman, who are told never to follow instructions inside them.
 - Reports are written **locally only**. The plugin has no telemetry, makes no network calls of its
   own and never reads API keys. All model calls go through Hermes with your existing credentials.
   Files you add are kept in the plugin's data folder: a copy per run (with the report), and the
@@ -367,6 +412,7 @@ files, use the Committee page, where you can see each file's size and the cost b
 | Stage | What happens | Notes |
 |---|---|---|
 | 0. Brief | Hermes frames the question and gathers an **evidence pack** (your files, numbers, short research with sources). From the page, your evidence box is the pack. | Optional |
+| 0b. Research first | One web search through Hermes's own tools; checked passages with sources join the evidence as [W1]…, the same for every seat. Page runs pause for you to untick sources. | Optional, off by default |
 | 1. Answers | Every seat answers **independently and in parallel**, with its role and instructions. | Roles optional |
 | 2. Peer ranking | Every seat ranks **all answers, anonymized** as Response A, B, C… Each reviewer sees them in a **different shuffled order**, and names and model ids are scrubbed from the text. | Shuffled per reviewer |
 | 2b. Deliberation | Optional, after the vote. The chairman lists the disputed points and tags each (action / claim / emphasis); the **plugin** decides from the setting whether to debate. Each seat holds or changes its position per point, with a reason; 1 or 2 rounds. | Optional |
@@ -421,7 +467,7 @@ hermes committee doctor           # one tiny call per seat to prove every route 
 hermes committee runs             # recent runs and their reports
 hermes committee run "question"   # run a committee headless (scripts, cron)
                                   #   --max-minutes 5 (0 = no limit), --max-usd 1.5 (0 = no limit),
-                                  #   --lite (no blind vote),
+                                  #   --lite (no blind vote), --research (Research first),
                                   #   --evidence-file a.pdf (repeat), --evidence-dir ./evidence
 hermes committee report <run-id>  # re-create a run's Markdown and PDF (no model calls)
 ```
@@ -440,7 +486,8 @@ Paragraphs containing Arabic script are set right-to-left.
 ### Limitations
 
 - Seats have **no tools** of their own. They reason over the same evidence pack, so every seat
-  judges the same facts.
+  judges the same facts. For current facts, turn on **Research first**: one shared search before
+  the seats start.
 - Arabic copied out of the PDF can come out garbled. It renders correctly; use `report.md` to copy text.
 - The plugin runs inside the Hermes process. It cannot run under `plugins.isolation: host`
   because the live progress message uses `ctx.post_message`.

@@ -17,7 +17,6 @@
  * list (`model.options`). The plugin never grants itself access to a provider.
  */
 import {
-  Button,
   ErrorState,
   PALETTE_AREA,
   ROUTES_AREA,
@@ -29,6 +28,13 @@ import {
   useQuery
 } from '@hermes/plugin-sdk'
 import { createElement as h, Fragment, useEffect, useRef, useState } from 'react'
+
+// One button system for the whole page: outline → secondary, ghost → quiet, destructive → danger.
+function Button({ size, variant, className, children, ...rest }) {
+  const kind = variant === 'destructive' ? 'danger' : variant === 'ghost' ? 'quiet' : 'secondary'
+  return h('button', { type: 'button', ...rest, className: `hc-b hc-b-${kind}${size === 'sm' ? ' hc-b-sm' : ''}${className ? ` ${className}` : ''}` }, children)
+}
+const busyLabel = text => [h('span', { key: 's', className: 'hc-bspin', 'aria-hidden': true }), text]
 
 const PLUGIN_ID = 'hermes-committee'
 const ROUTE = '/hermes-committee'
@@ -211,7 +217,7 @@ function Markdown({ text }) {
 // Everything drawn on the Convene page comes from here, and here only reads what the engine recorded.
 
 const REPLAY_SPEED = 10
-const STAGES = ['stage1', 'review', 'deliberate', 'chair']
+const STAGES = ['research', 'stage1', 'review', 'deliberate', 'chair']
 const REDUCED = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
 const clock = s => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` }
 const fit = (s, n) => (String(s).length > n ? `${String(s).slice(0, Math.max(1, n - 1)).trimEnd()}…` : String(s))
@@ -233,9 +239,10 @@ function snap(run, t, replaying) {
   const st = (who, stage) => { const ls = of(who, stage); return ls.some(b => b.running) ? 'run' : ls.length ? 'ok' : null }
   let stage
   if (ended) stage = run.status === 'done' ? 'done' : 'stopped'
-  else if (live) stage = lv.stage || 'stage1'
+  else if (live) stage = lv.researching || lv.sources ? 'research' : lv.stage || 'stage1'
   else { stage = 'stage1'; STAGES.forEach(k => { const v = run.starts?.[k]; if (v != null && v <= t) stage = k }) }
   const describing = live && stage === 'stage1' && !!lv.describing
+  const researching = stage === 'research' ? (live ? (lv.sources ? 'review' : lv.researching || 'starting') : 'searching') : ''
   const seatsOut = {}
   seats.forEach(s => {
     const L = s.label
@@ -264,7 +271,7 @@ function snap(run, t, replaying) {
   }
   const rankAt = run.starts?.deliberate ?? run.starts?.chair
   const ranked = (run.ranking || []).length > 0 && (live || ended || (rankAt != null && t >= rankAt))
-  return { t, live, replaying, ended, stage, step: live ? lv.step : null, describing, seats: seatsOut, chair, chairLanes,
+  return { t, live, replaying, ended, stage, step: live ? lv.step : null, describing, researching, seats: seatsOut, chair, chairLanes,
     ballots: [...new Set(ballots)], okSeats, debaters: seats.filter(s => seatsOut[s.label].d === 'run').map(s => s.label),
     replies: lanes.filter(b => b.stage === 'deliberate' && b.who !== 'chair' && !b.running).length,
     lanes, totals, events: (run.events || []).filter(e => e.t <= t + 0.05), ranked,
@@ -291,43 +298,153 @@ function spokeEnds([x, y], r) {
 // A dot that travels along a path, then removes itself. Nothing happens with reduced motion.
 function fly(g, cls, pts, dur, r = 4.5, done) {
   if (!g || !g.isConnected || REDUCED) { if (done) done(); return }
-  const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
-  c.setAttribute('class', cls); c.setAttribute('r', r); c.setAttribute('opacity', 0)
+  const diamond = cls.includes('hc-fx-ballot')
+  const c = document.createElementNS('http://www.w3.org/2000/svg', diamond ? 'rect' : 'circle')
+  c.setAttribute('class', cls); c.setAttribute('opacity', 0)
+  if (diamond) { c.setAttribute('width', r * 2); c.setAttribute('height', r * 2) } else c.setAttribute('r', r)
   g.appendChild(c)
   const t0 = performance.now()
   const f = now => {
     if (!c.isConnected) return
     const p = Math.min((now - t0) / dur, 1), e = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2
     const k = e * (pts.length - 1), i = Math.floor(k), fr = k - i, [a, b] = pts[i], [x, y] = pts[Math.min(i + 1, pts.length - 1)]
-    c.setAttribute('cx', a + (x - a) * fr); c.setAttribute('cy', b + (y - b) * fr)
+    const cx = a + (x - a) * fr, cy = b + (y - b) * fr
+    if (diamond) { c.setAttribute('x', cx - r); c.setAttribute('y', cy - r); c.setAttribute('transform', `rotate(45 ${cx} ${cy})`) }
+    else { c.setAttribute('cx', cx); c.setAttribute('cy', cy) }
     c.setAttribute('opacity', p < 0.12 ? p / 0.12 : p > 0.88 ? (1 - p) / 0.12 : 1)
     if (p < 1) requestAnimationFrame(f); else { c.remove(); if (done) done() }
   }
   requestAnimationFrame(f)
 }
 
+// ── the evidence box over the table (HTML, so its text stays readable at any size). Every model call
+// that takes evidence (answers, blind vote, debate, the chairman's agenda and verdict) draws it from the
+// box's outlet, the top centre of the drawing. Research calls get the question only, so they draw nothing. ──
+const TAKES_EVIDENCE = { stage1: 1, review: 1, deliberate: 1, chair: 1 }
+const TOP = -336
+function evidencePills(run) {
+  const ix = run.evidence_index || {}, secs = ix.sections || [], imgs = ix.images || []
+  const files = (run.files || []).map(f => {
+    const own = secs.filter(x => x.source === f.name).map(x => x.id), img = imgs.find(i => i.source === f.name)
+    const id = img ? img.id : own.length > 1 ? `${own[0]}–${own[own.length - 1].replace(/^\D+/, '')}` : own[0] || (f.kind === 'image' ? 'I' : 'E')
+    return { id, label: f.name, title: f.name, kind: img || f.kind === 'image' ? 'img' : 'file' }
+  })
+  if (String(run.evidence || '').trim()) files.push({ id: '✎', label: 'typed notes', title: fit(String(run.evidence).trim(), 300), kind: 'file' })
+  const web = (run.web?.items || []).filter(w => w.keep !== false).map(w => ({ id: w.id, kind: 'web',
+    label: String(w.site || '').replace(/^www\./, '').replace(/\.[a-z.]{2,}$/i, '') || 'web',
+    title: `${w.title || ''} · ${w.site || ''}\n${fit(w.excerpt || '', 220)}\n${w.url || ''}`.trim() }))
+  return { files, web }
+}
+const webVisible = (run, sn) => (run.web?.items || []).length > 0 && sn.stage !== 'research'
+  && (sn.live || sn.ended || run.starts?.stage1 == null || sn.t >= run.starts.stage1)
+function EvidenceBox({ run, sn, boxRef }) {
+  const ev = evidencePills(run)
+  const webShown = webVisible(run, sn)
+  const files = ev.files.slice(0, 10), more = ev.files.slice(10)
+  const nFiles = (run.files || []).length
+  const count = [nFiles ? `${nFiles} file${nFiles > 1 ? 's' : ''}` : '', String(run.evidence || '').trim() ? 'typed notes' : '',
+    webShown ? `${ev.web.length} web source${ev.web.length > 1 ? 's' : ''}` : ''].filter(Boolean).join(' · ')
+  const webNote = sn.stage === 'research' ? (sn.researching === 'review' ? '🌐 Research first · waiting for your source review…' : '🌐 Research first · the chairman’s model is searching the web…')
+    : webShown ? '' : run.research ? (run.web && sn.stage !== 'stage1' || sn.ended ? '🌐 Research first found no sources to use' : '🌐 Research first · sources arrive before the answers') : ''
+  const chip = (q, i) => h('span', { key: `${q.id}${i}`, className: `hc-ep hc-ep-${q.kind}`, title: q.title, style: { animationDelay: `${i * 0.12}s` } },
+    h('b', null, q.id), h('span', null, q.label))
+  return h('div', { className: `hc-evbox2${sn.stage === 'research' ? ' hc-evsearch' : ''}`, ref: boxRef },
+    h('div', { className: 'hc-evhead' }, h('b', null, 'Evidence'), h('span', null, 'every model reads all of it, straight from here'),
+      h('span', { className: 'hc-evcount' }, count)),
+    h('div', { className: 'hc-evrow' }, files.length ? files.map(chip) : h('span', { className: 'hc-evnote' }, 'No files or typed evidence · each call gets the question and background'),
+      more.length ? h('span', { className: 'hc-ep hc-ep-more', title: more.map(q => `${q.id}  ${q.title}`).join('\n') }, `+${more.length} more`) : null),
+    webShown || webNote ? h('div', { className: 'hc-evrow' }, webShown ? ev.web.map(chip) : h('span', { className: 'hc-evnote' }, webNote)) : null,
+    h('i', { className: 'hc-evout' }))
+}
+const quadPts = (a, c, b, n = 36) => Array.from({ length: n + 1 }, (_, k) => {
+  const t = k / n, u = 1 - t
+  return [u * u * a[0] + 2 * u * t * c[0] + t * t * b[0], u * u * a[1] + 2 * u * t * c[1] + t * t * b[1]]
+})
+const qd = (a, c, b) => `M${a[0].toFixed(1)} ${a[1].toFixed(1)} Q${c[0].toFixed(1)} ${c[1].toFixed(1)} ${b[0].toFixed(1)} ${b[1].toFixed(1)}`
+function lines2(text, n) {
+  const out = ['']
+  for (const w of String(text || '').split(/\s+/)) {
+    if (!w) continue
+    if ((out[out.length - 1] + ' ' + w).trim().length > n) { if (out.length === 2) { out[1] = fit(out[1] + ' ' + w, n); break } out.push(w) }
+    else out[out.length - 1] = (out[out.length - 1] + ' ' + w).trim()
+  }
+  return out.filter(Boolean)
+}
+let tableIds = 0
+const BW = 300, BH = 62
+
 function ArcStage({ run, sn }) {
   const seats = seatList(run)
   const { ang, pos, r, chord } = arcLayout(seats.length)
-  const fx = useRef(null)
-  const prev = useRef(null)
+  const R = r + 7
+  const fx = useRef(null), fxUnder = useRef(null), boxRef = useRef(null), outRef = useRef(null), prev = useRef(null)
+  const uid = useRef(null); if (uid.current == null) uid.current = ++tableIds
+  const id = k => `hc${uid.current}${k}`
   const [ripple, setRipple] = useState(0)
+  const [bubbles, setBubbles] = useState({})
   const idx = Object.fromEntries(seats.map((s, i) => [s.label, i]))
-  const order = (run.ranking || []).length ? run.ranking.map(x => x.label).filter(l => l in idx) : seats.map(s => s.label)
-  const chars = Math.max(7, Math.floor((Math.min(chord, 250) - 14) / 7.6))
-  const questionUp = () => seats.forEach((s, i) => { const [a, b] = spokeEnds(pos[i], r); fly(fx.current, 'hc-fx-out', linePts(b, a), 700) })
+  const chars = Math.max(7, Math.floor((Math.min(chord, 260) - 10) / 9.2))
+  const benchTop = BENCH.y - BH / 2
+  // geometry: feeds from the outlet to above each seat's name; curved spokes from each seat to the bench
+  const feeds = pos.map(([x, y]) => { const a = [0, TOP], c = [x, TOP + 6], b = [x, y - R - 58]; return { d: qd(a, c, b), pts: quadPts(a, c, b) } })
+  const chairFeed = { d: `M0 ${TOP} L0 ${benchTop - 14}`, pts: linePts([0, TOP], [0, benchTop - 14], 40) }
+  const spokes = pos.map(([x, y], i) => {
+    const e = [Math.max(-BW / 2 + 40, Math.min(BW / 2 - 40, (i - (seats.length - 1) / 2) * 36)), benchTop + 2]
+    const c = [(x + e[0]) / 2, Math.max(y, e[1]) - 46]
+    const d0 = Math.hypot(c[0] - x, c[1] - y), a = [x + ((c[0] - x) / d0) * (R + 3), y + ((c[1] - y) / d0) * (R + 3)]
+    return { d: qd(a, c, e), pts: quadPts(a, c, e), back: quadPts(e, c, a) }
+  })
+  const ch = sn.chair
+  const chairLane = sn.chairLanes.find(b => b.running)
+  const chairTok = sn.chairLanes.filter(b => !b.running).reduce((x, b) => x + (b.tokens || 0), 0)
+  const expChair = Math.max(45, run.expected_secs?.[run.chairman?.model || 'active model'] || 60)
+  const fill = sn.stage === 'done' ? 1 : ch === 'run' && chairLane ? Math.min(0.94, chairLane.shown / expChair) : 0
+  const webShown = webVisible(run, sn)
+  const nWeb = (run.web?.items || []).filter(w => w.keep !== false).length
+
+  const glowBox = wait => setTimeout(() => {
+    if (REDUCED) return
+    for (const el of [boxRef.current, outRef.current]) if (el) { el.classList.add('hc-sending'); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('hc-sending'), 1400) }
+  }, wait)
+  const send = (to, k = 0, wait = 0) => {
+    const f = to === 'chair' ? chairFeed : feeds[idx[to]]
+    if (!f) return
+    for (let j = 0; j < 4; j++) setTimeout(() => fly(fxUnder.current, j % 2 ? 'hc-fx-ev hc-fx-ev2' : 'hc-fx-ev', f.pts, 1150, 4.5 - j * 0.6), wait + k * 60 + j * 80)
+    glowBox(wait)
+  }
+  const laneKey = b => `${b.who}|${b.stage}|${b.start}`
   useEffect(() => {
     const p = prev.current
+    const answered = seats.filter(s => sn.seats[s.label]?.a === 'ok').map(s => s.label)
     if (p) {
-      if (sn.stage === 'stage1' && p.stage !== 'stage1') questionUp()
+      let k = 0
+      const wait = webShown && !p.webShown ? Math.min(2200, 900 + nWeb * 140) : 0   // let the sources land first
+      sn.lanes.forEach(b => {
+        if (p.lanes.has(laneKey(b)) || !TAKES_EVIDENCE[b.stage]) return
+        if (b.who === 'chair') { if (b.stage === 'chair' || b.stage === 'deliberate') send('chair', k++, wait) } else if (b.who in idx) send(b.who, k++, wait)
+      })
+      // an answer lands: a burst runs down its spoke and its first line shows beside the seat
+      answered.filter(l => !p.answered.includes(l)).forEach(l => {
+        const sp = spokes[idx[l]]
+        for (let j = 0; j < 5; j++) setTimeout(() => fly(fx.current, 'hc-fx-ans', sp.pts, 1000, 4.5 - j * 0.6), j * 70)
+        const text = sn.seats[l]?.summary
+        if (text && !sn.masked) {
+          setBubbles(b => ({ ...b, [l]: text }))
+          setTimeout(() => setBubbles(b => { const n = { ...b }; delete n[l]; return n }), 3800)
+        }
+      })
       sn.ballots.filter(l => !p.ballots.includes(l) && l in idx).forEach(l => {
         const i = idx[l]
-        seats.forEach((s, j) => { if (j !== i && sn.okSeats.includes(s.label)) fly(fx.current, 'hc-fx-ballot', arcPts(ang[i], ang[j], -(52 + Math.random() * 26)), 850 + Math.abs(i - j) * 120 + Math.random() * 250, 5) })
+        seats.forEach((s, j) => { if (j !== i && sn.okSeats.includes(s.label)) fly(fx.current, 'hc-fx-ballot', arcPts(ang[i], ang[j], -(62 + Math.random() * 26)), 850 + Math.abs(i - j) * 120 + Math.random() * 250, 4.5) })
       })
-      if (sn.chair === 'run' && p.chair !== 'run') order.forEach((l, k) => setTimeout(() => { const [a, b] = spokeEnds(pos[idx[l]], r); fly(fx.current, 'hc-fx-out', linePts(a, b), 1100, 5) }, 80 + k * 260))
-      if (sn.stage === 'done' && p.stage !== 'done') setRipple(x => x + 1)
-    } else if (sn.stage === 'stage1' && sn.t < 6) questionUp()
-    prev.current = { stage: sn.stage, ballots: sn.ballots, chair: sn.chair }
+      if (sn.chair === 'run' && p.chair !== 'run') seats.forEach((s, n) => { if (sn.okSeats.includes(s.label)) setTimeout(() => fly(fx.current, 'hc-fx-out', spokes[n].pts, 1000, 4.5), 300 + n * 200) })
+      if (webShown && !p.webShown) for (let n = 0; n < nWeb; n++) setTimeout(() => fly(fx.current, 'hc-fx-web', quadPts([0, benchTop], [(n - nWeb / 2) * 60, 0], [0, TOP]), 900, 5), n * 140)
+      if (sn.stage === 'done' && p.stage !== 'done') {
+        setRipple(x => x + 1)
+        seats.forEach((s, n) => { const st = sn.stances[s.label]; if (st) setTimeout(() => fly(fx.current, st === 'agree' ? 'hc-fx-ok' : 'hc-fx-warn', spokes[n].back, 1100, 6), n * 120) })
+      }
+    } else if (sn.stage === 'stage1' && sn.t < 6) sn.lanes.filter(b => b.stage === 'stage1' && b.running && b.who in idx).forEach((b, n) => send(b.who, n))
+    prev.current = { stage: sn.stage, ballots: sn.ballots, chair: sn.chair, webShown, answered, lanes: new Set(sn.lanes.map(laneKey)) }
   })
   const deb = sn.debaters.join(',')
   useEffect(() => {
@@ -336,61 +453,104 @@ function ArcStage({ run, sn }) {
     let alive = true
     const spark = (a, b) => {
       if (!alive) return
-      fly(fx.current, 'hc-fx-spark', arcPts(ang[a], ang[b], -(40 + Math.random() * 30)), 700 + Math.abs(a - b) * 130, 4,
+      fly(fx.current, 'hc-fx-spark', arcPts(ang[a], ang[b], -(48 + Math.random() * 30)), 700 + Math.abs(a - b) * 130, 4.5,
         () => setTimeout(() => { const o = list.filter(x => x !== b); spark(b, o[Math.floor(Math.random() * o.length)]) }, 120 + Math.random() * 250))
     }
     list.forEach((a, k) => setTimeout(() => spark(a, list[(k + 1) % list.length]), k * 260))
     return () => { alive = false }
   }, [deb, seats.length])
 
-  const [sx, sy] = arcAt(ang[0] - 0.12), [ex, ey] = arcAt(ang[ang.length - 1] + 0.12)
-  const beams = sn.chair === 'run' || sn.stage === 'done'
-  const ch = sn.chair
-  const chairLane = sn.chairLanes.find(b => b.running)
-  const chairTok = sn.chairLanes.filter(b => !b.running).reduce((x, b) => x + (b.tokens || 0), 0)
-  return h('div', { className: 'hc-stagewrap' }, h('svg', { className: 'hc-room', viewBox: '-490 -330 980 650', role: 'img',
-      'aria-label': `The committee table: ${seats.length} seats and the chairman` },
-    h('path', { className: 'hc-orbit', d: `M${sx} ${sy} A${RA} ${RA} 0 0 1 ${ex} ${ey}` }),
-    seats.map((s, i) => { const [[x1, y1], [x2, y2]] = spokeEnds(pos[i], r); return h('line', { key: `sp${s.label}`, className: `hc-spoke${sn.stage === 'done' ? ' hc-lit' : ''}`, x1, y1, x2, y2 }) }),
-    beams ? order.map((l, k) => {
-      const [[x1, y1], [x2, y2]] = spokeEnds(pos[idx[l]], r), L = Math.hypot(x2 - x1, y2 - y1)
-      return h('line', { key: `bm${l}`, className: `hc-beam${sn.stage === 'done' ? ' hc-beam-done' : ''}`, x1, y1, x2, y2,
-        style: sn.stage === 'done' ? undefined : { strokeDasharray: L, strokeDashoffset: L, animationDelay: `${80 + k * 260}ms` } })
-    }) : null,
-    ripple && sn.stage === 'done' ? [0, 1, 2].map(k => h('rect', { key: `rp${ripple}-${k}`, className: 'hc-ripple', x: -BENCH.w / 2, y: BENCH.y - BENCH.h / 2,
-      width: BENCH.w, height: BENCH.h, rx: 30, style: { animationDelay: `${k * 380}ms` } })) : null,
-    h('g', { className: `hc-node hc-chair${ch === 'run' || ch === 'agenda' ? ' hc-thinking hc-glow' : ''}${ch === 'ok' ? ' hc-decided' : ''}`, transform: `translate(0 ${BENCH.y})` },
-      h('rect', { className: 'hc-disc', x: -BENCH.w / 2, y: -BENCH.h / 2, width: BENCH.w, height: BENCH.h, rx: 30 }),
-      h('rect', { className: 'hc-ring', x: -BENCH.w / 2 - 9, y: -BENCH.h / 2 - 9, width: BENCH.w + 18, height: BENCH.h + 18, rx: 39 }),
-      h('text', { className: 'hc-lbl', textAnchor: 'middle', y: -2 }, '⚖  Chairman'),
-      h('text', { className: 'hc-sub', textAnchor: 'middle', y: 16 }, fit(shortModel(run.chairman?.model) || 'active model', 28)),
-      h('text', { className: 'hc-tk', textAnchor: 'middle', y: 52 },
-        ch === 'agenda' ? `listing the disputed points · ${clock(chairLane?.shown)}` : ch === 'run' ? `writing the verdict · ${clock(chairLane?.shown)}`
-          : chairTok ? `${fmtNum(chairTok)} tok` : '')),
-    seats.map((s, i) => {
-      const S = sn.seats[s.label] || {}
-      const stance = sn.stances[s.label]
-      const masked = sn.masked
-      const cls = ['hc-node', S.a === 'run' && 'hc-thinking', S.v === 'run' && 'hc-voting', S.d === 'run' && 'hc-debating', masked && 'hc-masked',
-        S.a === 'fail' && 'hc-failed', stance === 'agree' && 'hc-agree', stance === 'dissent' && 'hc-dissent', S.a === 'ok' && !stance && 'hc-answered'].filter(Boolean).join(' ')
-      const status = masked ? (S.v === 'run' ? 'ranking the others…' : S.v === 'ok' ? 'ballot cast' : S.a === 'fail' ? 'no answer' : '')
-        : S.d === 'run' ? 'replying on the disputed points…' : S.a === 'run' ? `answering · ${clock(S.run)}` : S.a === 'fail' ? 'no answer'
-          : S.a === 'ok' ? clause(S.summary) : ''
-      const ARC = 2 * Math.PI * (r + 6)
-      const [x, y] = pos[i]
-      return h('g', { key: s.label, className: cls, transform: `translate(${x.toFixed(1)} ${y.toFixed(1)})` },
-        h('title', null, masked ? `Response ${s.label}` : `${s.name}${S.summary ? `\n${S.summary}` : ''}`),
-        h('circle', { className: 'hc-disc', r }),
-        h('circle', { className: 'hc-arc', r: r + 6, strokeDasharray: ARC, strokeDashoffset: ARC * (1 - (S.a === 'run' ? S.p : S.a ? 1 : 0)) }),
-        h('circle', { className: 'hc-ring', r: r + 14 }),
-        h('text', { className: 'hc-ini' }, initials(s.name)),
-        h('text', { className: 'hc-let' }, s.label),
-        h('text', { className: 'hc-lbl', textAnchor: 'middle', y: -(r + 81) }, fit(s.name, chars)),
-        h('text', { className: 'hc-sub', textAnchor: 'middle', y: -(r + 64) }, fit(shortModel(s.model) || 'active model', chars)),
-        h('text', { className: 'hc-stance', textAnchor: 'middle', y: -(r + 44) }, fit(status, Math.min(chars + 4, 36))),
-        h('text', { className: 'hc-tk', textAnchor: 'middle', y: -(r + 22) }, S.tokens ? `${fmtNum(S.tokens)} tok` : ''))
-    }),
-    h('g', { ref: fx })))
+  const debList = sn.debaters.map(l => idx[l]).filter(i => i != null)
+  const verdictWait = ch === 'run'
+  const debating = sn.stage === 'deliberate' && (sn.debaters.length > 0 || sn.replies > 0)
+  const chairStatus = sn.stage === 'research' ? (sn.researching === 'review' ? 'waiting for your source review' : 'researching the question…')
+    : ch === 'agenda' ? `listing the disputed points · ${clock(chairLane?.shown)}` : ch === 'run' ? `writing the verdict · ${clock(chairLane?.shown)}`
+      : ch === 'ok' ? `decided${chairTok ? ` · ${fmtNum(chairTok)} tok` : ''}` : chairTok ? `${fmtNum(chairTok)} tok` : 'listening'
+  const decision = sn.stage === 'done' ? (run.chair?.decision || '') : ''
+  const ARC = 2 * Math.PI * R
+  return h('div', { className: 'hc-stagewrap2' },
+    h(EvidenceBox, { run, sn, boxRef }),
+    h('div', { className: 'hc-stagewrap' }, h('svg', { className: 'hc-room hc-table', viewBox: '-490 -340 980 712', role: 'img',
+        'aria-label': `The committee table: ${seats.length} seats and the chairman; the evidence box above sends the same evidence to every model` },
+      h('defs', null,
+        h('radialGradient', { id: id('floor'), cx: '50%', cy: '100%', r: '75%' },
+          h('stop', { offset: '0', stopColor: 'var(--hc-acc)', stopOpacity: 0.16 }), h('stop', { offset: '0.6', stopColor: 'var(--hc-acc)', stopOpacity: 0.03 }),
+          h('stop', { offset: '1', stopColor: 'var(--hc-acc)', stopOpacity: 0 })),
+        h('filter', { id: id('glow'), x: '-80%', y: '-80%', width: '260%', height: '260%' }, h('feGaussianBlur', { stdDeviation: 7 })),
+        h('clipPath', { id: id('bench') }, h('rect', { x: -BW / 2, y: -BH / 2, width: BW, height: BH, rx: BH / 2 }))),
+      h('ellipse', { cx: 0, cy: BENCH.y + 70, rx: 580, ry: 340, fill: `url(#${id('floor')})` }),
+      [0, 1, 2].map(i => h('ellipse', { key: `g${i}`, className: 'hc-guide', cx: 0, cy: BENCH.y + 60, rx: 260 + i * 100, ry: 150 + i * 72, style: { opacity: 0.5 - i * 0.13 } })),
+      h('g', { className: 'hc-feeds', ref: outRef },
+        feeds.map((f, i) => h('path', { key: `fd${i}`, className: 'hc-feed', d: f.d })),
+        h('path', { className: 'hc-feed hc-feed-chair', d: chairFeed.d }),
+        h('circle', { className: 'hc-outlet', cx: 0, cy: TOP, r: 5 })),
+      h('g', { ref: fxUnder }),
+      seats.map((s, i) => {
+        const S = sn.seats[s.label] || {}
+        const active = S.a === 'run' || S.v === 'run' || S.d === 'run'
+        return h('g', { key: `sp${s.label}` },
+          h('path', { className: 'hc-tspoke', d: spokes[i].d }),
+          active ? h('path', { className: `hc-tenergy ${S.v === 'run' ? 'hc-e-vote' : S.d === 'run' ? 'hc-e-deb' : ''}`, d: spokes[i].d }) : null)
+      }),
+      debList.length >= 2 ? debList.slice(1).map((b, k) => {
+        const a = debList[k], [x1, y1] = pos[a], [x2, y2] = pos[b]
+        return h('path', { key: `db${k}`, className: 'hc-debarc', d: qd([x1, y1 + R], [(x1 + x2) / 2, Math.max(y1, y2) + 120], [x2, y2 + R]) })
+      }) : null,
+      ripple && sn.stage === 'done' ? [0, 1, 2].map(k => h('ellipse', { key: `rp${ripple}-${k}`, className: 'hc-tripple', cx: 0, cy: BENCH.y, rx: BW / 2, ry: BH / 2, style: { animationDelay: `${k * 350}ms` } })) : null,
+      h('g', { className: `hc-bench${ch === 'run' || ch === 'agenda' ? ' hc-bwrite' : ''}${ch === 'ok' ? ' hc-bdone' : ''}${sn.stage === 'research' ? ' hc-bresearch' : ''}`, transform: `translate(0 ${BENCH.y})` },
+        h('rect', { className: 'hc-bhalo', x: -BW / 2 - 10, y: -BH / 2 - 6, width: BW + 20, height: BH + 12, rx: BH / 2 + 6, filter: `url(#${id('glow')})` }),
+        h('rect', { className: 'hc-bdisc', x: -BW / 2, y: -BH / 2, width: BW, height: BH, rx: BH / 2 }),
+        h('g', { clipPath: `url(#${id('bench')})` },
+          h('rect', { className: 'hc-bfill', x: -BW / 2, y: -BH / 2, width: BW * fill, height: BH }),
+          sn.stage === 'research' ? h('rect', { className: 'hc-bscan', x: -BW / 2, y: -BH / 2, width: 34, height: BH }) : null),
+        h('text', { className: 'hc-btitle', y: -4 }, '⚖  CHAIRMAN'),
+        h('text', { className: 'hc-bsub', y: 17 }, fit(shortModel(run.chairman?.model) || 'active model', 34)),
+        h('text', { className: 'hc-bstat', y: BH / 2 + 24 }, chairStatus),
+        decision ? lines2(`“${decision}”`, 78).map((t, j) => h('text', { key: `v${j}`, className: 'hc-bverdict', y: BH / 2 + 52 + j * 22 }, t)) : null),
+      seats.map((s, i) => {
+        const S = sn.seats[s.label] || {}
+        const stance = sn.stances[s.label]
+        const masked = sn.masked
+        const waiting = verdictWait && !stance && S.a === 'ok'
+        const idle = debating && !S.d && S.a === 'ok'
+        const active = S.a === 'run' || S.v === 'run' || S.d === 'run'
+        const cls = ['hc-node hc-tseat', S.a === 'run' && 'hc-thinking', S.v === 'run' && 'hc-voting', S.d === 'run' && 'hc-debating', masked && 'hc-masked',
+          S.a === 'fail' && 'hc-failed', stance === 'agree' && 'hc-agree', stance === 'dissent' && 'hc-dissent', S.a === 'ok' && !stance && !active && 'hc-answered',
+          waiting && 'hc-waiting', idle && 'hc-idle', active && 'hc-active'].filter(Boolean).join(' ')
+        const status = masked ? (S.v === 'run' ? 'ranking the others…' : S.v === 'ok' ? 'ballot cast' : S.a === 'fail' ? 'no answer' : '')
+          : S.d === 'run' ? 'replying on the disputed points…' : S.a === 'run' ? `answering · ${clock(S.run)}` : S.a === 'fail' ? 'no answer'
+            : stance === 'agree' ? 'in line with the decision' : stance === 'dissent' ? 'dissent kept'
+              : waiting ? 'waiting for the verdict' : idle ? 'not in the debate' : S.a === 'ok' ? 'answered' : sn.stage === 'research' ? 'waiting for the sources' : 'waiting'
+        const prog = S.a === 'run' ? S.p : S.a ? 1 : 0
+        const [x, y] = pos[i]
+        return h('g', { key: s.label, className: cls, transform: `translate(${x.toFixed(1)} ${y.toFixed(1)})` },
+          h('title', null, masked ? `Response ${s.label}` : `${s.name}${S.summary ? `\n${S.summary}` : ''}`),
+          h('g', { className: 'hc-podg' },
+            h('circle', { className: 'hc-thalo', r: R + 6, filter: `url(#${id('glow')})` }),
+            h('circle', { className: 'hc-ttrack', r: R }),
+            h('circle', { className: 'hc-tarc', r: R, strokeDasharray: ARC, strokeDashoffset: ARC * (1 - prog) }),
+            active ? h('circle', { className: 'hc-tcomet', r: R, strokeDasharray: `${(ARC * 0.14).toFixed(1)} ${ARC.toFixed(1)}` }) : null,
+            h('circle', { className: 'hc-tdisc', r }),
+            h('text', { className: 'hc-ini' }, initials(s.name)),
+            h('text', { className: 'hc-let' }, s.label)),
+          h('text', { className: 'hc-lbl', textAnchor: 'middle', y: -(R + 34) }, masked ? `Response ${s.label}` : fit(s.name, chars)),
+          h('text', { className: 'hc-sub', textAnchor: 'middle', y: -(R + 14) }, fit(shortModel(s.model) || 'active model', chars + 2)),
+          h('text', { className: 'hc-stance', textAnchor: 'middle', y: R + 27 }, fit(status, Math.max(chars + 6, 30))),
+          h('text', { className: 'hc-tk', textAnchor: 'middle', y: R + 46 }, S.tokens ? `${fmtNum(S.tokens)} tok` : ''))
+      }),
+      h('g', { ref: fx }),
+      Object.entries(bubbles).map(([l, text]) => {
+        const i = idx[l]
+        if (i == null) return null
+        const [x, y] = pos[i], W = 270, L = lines2(text, 38)
+        // centre seat: below · outer seats: below, reaching inward · inner seats: beside, on the outer side
+        const H = 14 + L.length * 18, below = Math.abs(x) < 40 || Math.abs(x) >= 250
+        const bx = Math.abs(x) < 40 ? x - W / 2 : Math.abs(x) >= 250 ? (x < 0 ? x - 60 : x + 60 - W) : (x < 0 ? x - R - 18 - W : x + R + 18)
+        const by = below ? y + R + 58 : y - H / 2
+        return h('g', { key: `bb${l}`, className: 'hc-bubble' },
+          h('rect', { x: bx, y: by, width: W, height: H, rx: 10 }),
+          L.map((t, j) => h('text', { key: j, x: bx + 12, y: by + 22 + j * 18 }, t)))
+      }))))
 }
 
 // Small arc for the brief (click a seat to edit it) and the decision (how each seat stood).
@@ -405,8 +565,12 @@ function MiniArc({ seats, selected, onSelect, height = 150 }) {
     seats.map((s, i) => h('g', { key: s.key, transform: `translate(${pts[i][0].toFixed(1)} ${pts[i][1].toFixed(1)})` },
       h('g', { className: `hc-mseat${s.stance ? ` hc-${s.stance}` : ''}${selected === s.key ? ' hc-sel' : ''}`, style: { animationDelay: `${(i + 1) * 45}ms` },
         onClick: onSelect ? () => onSelect(s.key) : undefined },
-        h('title', null, s.title || s.name), h('circle', { r: 14 }), h('text', null, initials(s.name))))))
+        h('title', null, s.title || s.name), h('circle', { r: 14 }), h('text', null, initials(s.name)),
+        s.drift ? h('g', { className: 'hc-drift', transform: 'translate(11 -11)' }, h('circle', { r: 5.5 }), h('text', null, '!')) : null))))
 }
+
+// The chairman's note on whether each seat with instructions kept to its role.
+const roleFit = (run, label) => ((run.chair || {}).role_fit || []).find(x => x.label === label)
 
 // Follows the Desktop theme: light or dark picks the stage hues; text on the accent stays readable.
 function useScheme(ref) {
@@ -561,11 +725,11 @@ const blank = (name = '') => ({ name, instructions: '', provider: '', model: '' 
 const clean = s => Object.fromEntries(Object.entries({ provider: s.provider, model: s.model }).filter(([, v]) => v))
 
 function fromRoster(r) {
-  return { template: r.template, review: r.review !== false, ...(r.deliberate ? { deliberate: r.deliberate, rounds: r.deliberate_rounds || 1 } : {}),
+  return { template: r.template, review: r.review !== false, research: !!r.research, research_secs: r.research_secs || 90, ...(r.deliberate ? { deliberate: r.deliberate, rounds: r.deliberate_rounds || 1 } : {}),
     chairGuidance: r.chairman_guidance || undefined, decision: typeof r.decision_focus === 'boolean' ? r.decision_focus : undefined,
-    chairman: { provider: r.chairman?.provider || '', model: r.chairman?.model || '' },
+    chairman: { provider: r.chairman?.provider || '', model: r.chairman?.model || '', ...(r.chairman?.thinking ? { thinking: r.chairman.thinking } : {}) },
     seats: (r.seats || []).map(s => ({ name: s.name || '', instructions: s.instructions || '', provider: s.provider || '', model: s.model || '',
-      ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}) })),
+      ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}), ...(s.thinking ? { thinking: s.thinking } : {}) })),
     ...(r.max_minutes != null ? { maxMinutes: r.max_minutes } : {}), ...(r.max_usd != null ? { maxUsd: r.max_usd } : {}) }
 }
 
@@ -574,12 +738,12 @@ const COMMITTEE_NAME = /^[\p{L}\p{N}][\p{L}\p{N}_ .()&+\-]{0,39}$/u
 
 // A saved committee from a run: seats, models, instructions, photo settings, chairman and limits.
 function presetFromRun(run) {
-  return { template: run.template, review: run.review !== false, deliberate: run.deliberate || 'never', deliberate_rounds: run.deliberate_rounds || 1,
+  return { template: run.template, review: run.review !== false, research: !!run.research, deliberate: run.deliberate || 'never', deliberate_rounds: run.deliberate_rounds || 1,
     ...(run.custom_brief ? { chairman_guidance: run.chairman_guidance, decision_focus: !!run.decision_focus } : {}),
     max_minutes: run.limits?.max_secs ? Math.round(run.limits.max_secs / 60) : 0, max_usd: run.limits?.max_usd || 0,
-    chairman: Object.fromEntries(Object.entries({ provider: run.chairman?.provider, model: run.chairman?.model }).filter(([, v]) => v)),
+    chairman: Object.fromEntries(Object.entries({ provider: run.chairman?.provider, model: run.chairman?.model, thinking: run.chairman?.thinking }).filter(([, v]) => v)),
     seats: (run.seats || []).slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map(s => ({ name: s.name, instructions: s.instructions || '',
-      ...(s.provider ? { provider: s.provider } : {}), ...(s.model ? { model: s.model } : {}), ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}) })) }
+      ...(s.provider ? { provider: s.provider } : {}), ...(s.model ? { model: s.model } : {}), ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}), ...(s.thinking ? { thinking: s.thinking } : {}) })) }
 }
 
 function SaveCommitteeButton({ run }) {
@@ -900,7 +1064,18 @@ function EvidencePanel({ state, upd, caps, stats }) {
       stats.pics ? h('div', null, `📷 ${stats.pics} picture${stats.pics > 1 ? 's' : ''}: ${stats.seeing} of ${state.seats.length} seats can see them; a vision model writes a description for the others, the blind vote and the chairman (${stats.pics} extra call${stats.pics > 1 ? 's' : ''}). Each picture costs ≈ ${fmtNum(IMG_TOKENS)} tokens per call to a seat that sees it.`) : null,
       stats.pics && !stats.describer ? h('div', { className: 'hc-warn-t' }, 'Every model here has refused pictures before or is set to descriptions only. Give the chairman or one seat a vision model, or remove the photos.') : null) : null,
     paste ? h('textarea', { className: 'hc-in', rows: 4, style: { marginTop: 8 }, value: state.evidence, onChange: e => upd({ evidence: e.target.value }),
-      placeholder: 'Or paste facts every AI should use: measurements, costs, logs, notes.' }) : null)
+      placeholder: 'Or paste facts every AI should use: measurements, costs, logs, notes.' }) : null,
+    h('div', { className: 'hc-research' },
+      h('button', { className: `hc-sw${state.research ? ' hc-on' : ''}`, role: 'switch', 'aria-checked': !!state.research, title: 'Research first',
+        onClick: () => upd({ research: !state.research }) }),
+      h('div', null, h('b', { className: 'hc-sm' }, '🌐 Research first'),
+        h('div', { className: 'hc-xs hc-muted' }, 'Hermes searches the web once before the seats start and adds what it finds, with sources, to the evidence. Every seat gets the same facts.',
+          state.research ? h(Fragment, null, ' On a run from this page you can untick sources before the seats start.') : null),
+        h('div', { className: 'hc-xs hc-muted' }, h('b', null, 'When to use it: '), 'questions that depend on current facts, prices, standards or recent events. Leave it off for your own data and internal decisions.'),
+        state.research ? h('div', { className: 'hc-row hc-xs', style: { gap: 6, marginTop: 4 } }, h('span', { className: 'hc-muted' }, 'Time allowed:'),
+          [[45, '45 s'], [90, '1½ min'], [150, '2½ min']].map(([v, l]) => h('button', { key: v, className: `hc-chip hc-chip-sm${(state.research_secs || 90) === v ? ' hc-on' : ''}`,
+            title: 'Research stops at this point and the committee goes on with what it found (your source review does not count)', onClick: () => upd({ research_secs: v }) }, l))) : null,
+        state.research ? h('div', { className: 'hc-xs hc-warn-t' }, 'Your question (not your files) is sent to your web search provider. About 2 extra calls on the chairman’s model and ~2,300 more tokens for each seat.') : null)))
 }
 
 function SetupView({ setup, models, onConvened, openHelp }) {
@@ -967,7 +1142,7 @@ function SetupView({ setup, models, onConvened, openHelp }) {
   const customBrief = chairGuidance.trim() !== (tplNow.chairman_guidance || '').trim() || decision !== !!tplNow.decision_focus
   const delib = state.deliberate || L.deliberate_default || 'material'
   const rounds = state.rounds === 2 ? 2 : 1
-  const estBody = JSON.stringify({ question: state.question || '?', evidence: state.evidence, template: state.template, review: state.review,
+  const estBody = JSON.stringify({ question: state.question || '?', evidence: state.evidence, template: state.template, review: state.review, research: !!state.research, research_secs: state.research_secs || 90,
     deliberate: delib, deliberate_rounds: rounds, chairman_guidance: chairGuidance, decision_focus: decision,
     chairman: state.chairman, max_usd: maxUsd, seats: state.seats.map(s => ({ name: s.name.trim() || 'Seat', instructions: s.instructions, provider: s.provider, model: s.model })),
     ...(stats.on.length && state.pack ? { evidence_pack: state.pack, evidence_files: stats.on.map(f => f.fid) } : {}) })
@@ -984,11 +1159,11 @@ function SetupView({ setup, models, onConvened, openHelp }) {
     if (problems.length) { notify('warning', problems[0]); if (!state.question.trim()) qRef.current?.focus(); return }
     setBusy(true); setGate(null)
     try {
-      const body = { question: state.question, title: (state.title || '').trim(), evidence: state.evidence, template: state.template, review: state.review,
+      const body = { question: state.question, title: (state.title || '').trim(), evidence: state.evidence, template: state.template, review: state.review, research: !!state.research, research_secs: state.research_secs || 90,
         deliberate: delib, deliberate_rounds: rounds, chairman_guidance: chairGuidance, decision_focus: decision, chairman: state.chairman, max_minutes: maxMin,
         max_usd: maxUsd, allow_unknown_price: unknownOk,
         seats: state.seats.map(s => ({ name: s.name.trim(), instructions: s.instructions.trim(), provider: s.provider, model: s.model,
-          ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}) })),
+          ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}), ...(s.thinking ? { thinking: s.thinking } : {}) })),
         ...(stats.on.length && state.pack ? { evidence_pack: state.pack, evidence_files: stats.on.map(f => f.fid) } : {}) }
       const res = await startCommittee(body, body.title || state.question.trim().slice(0, 60))
       if (res.gate) { setGate(res.gate); return }
@@ -1004,9 +1179,9 @@ function SetupView({ setup, models, onConvened, openHelp }) {
     name = (name || '').trim()
     if (!COMMITTEE_NAME.test(name)) { notify('warning', 'Give the committee a name: up to 40 characters, starting with a letter or digit.'); return }
     try {
-      const preset = { template: state.template, review: state.review, deliberate: delib, deliberate_rounds: rounds,
-        ...(customBrief ? { chairman_guidance: chairGuidance, decision_focus: decision } : {}), max_minutes: maxMin, max_usd: maxUsd, chairman: clean(state.chairman),
-        seats: state.seats.map(s => ({ name: s.name.trim(), instructions: s.instructions.trim(), ...clean(s), ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}) })) }
+      const preset = { template: state.template, review: state.review, research: !!state.research, research_secs: state.research_secs || 90, deliberate: delib, deliberate_rounds: rounds,
+        ...(customBrief ? { chairman_guidance: chairGuidance, decision_focus: decision } : {}), max_minutes: maxMin, max_usd: maxUsd, chairman: { ...clean(state.chairman), ...(state.chairman.thinking ? { thinking: state.chairman.thinking } : {}) },
+        seats: state.seats.map(s => ({ name: s.name.trim(), instructions: s.instructions.trim(), ...clean(s), ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}), ...(s.thinking ? { thinking: s.thinking } : {}) })) }
       const r = await rest('/presets', { method: 'POST', body: { name, preset } })
       if (!r || r.ok === false) throw new Error(r?.error || 'The preset was not saved')
       notify('success', `Saved committee “${name}”. Pick it under “My committees” next time; the question and evidence are yours to add each time.`)
@@ -1037,11 +1212,13 @@ function SetupView({ setup, models, onConvened, openHelp }) {
   const warns = [
     maxUsd && est && est.high > maxUsd && est.low <= maxUsd ? ['Long answers would pass the budget: they may be shortened, then the vote skipped.', 'The run stays within the budget'] : null,
     maxMin && minutes && minutes > maxMin ? [`Usually takes ${minutes} min: slow seats or the vote may be cut.`, 'Raise the time limit to keep every stage'] : null,
+    state.research && maxMin && maxMin < (minutes || 3) + 3 ? [`Research first needs about a minute: with a ${maxMin}-min limit it may be cut short or skipped.`, `${Math.max(8, (minutes || 3) + 3)} min or more is safer`] : null,
     sameModel ? ['All seats use the same model: the views will be less independent.', ''] : null,
     ...(est?.context_warnings || []).map(w => [`⚠ ${w}`, '']),
     lockedNow.length ? [`🔒 ${lockedNow.length} provider${lockedNow.length > 1 ? 's' : ''} need your OK once: Convene shows the command.`, ''] : null,
   ].filter(Boolean)
-  const calls = `${plannedCalls(n, state.review) + stats.pics}${delib !== 'never' ? `–${plannedCalls(n, state.review) + stats.pics + debateCalls(n, delib, rounds)}` : ''}`
+  const web = state.research ? 2 : 0
+  const calls = `${plannedCalls(n, state.review) + stats.pics + web}${delib !== 'never' ? `–${plannedCalls(n, state.review) + stats.pics + web + debateCalls(n, delib, rounds)}` : ''}`
   const emax = est ? Math.max(maxUsd || 0, est.high, 0.01) * 1.15 : 1
   const nModels = n + 1
 
@@ -1072,6 +1249,7 @@ function SetupView({ setup, models, onConvened, openHelp }) {
     h('div', null, h('label', { className: 'hc-elbl' }, 'AI model'), h(ModelPicker, { slot: state.chairman, models, locked, onPick: patch => upd({ chairman: { ...state.chairman, ...patch } }) }),
       locked(state.chairman.provider) ? h('div', { className: 'hc-xs hc-warn-t', style: { marginTop: 6 } }, '🔒 This provider needs your OK once. Convene will show you the command.') : null),
     stats.pics ? h(PhotoChoice, { slot: state.chairman, caps, onChange: patch => upd({ chairman: { ...state.chairman, ...patch } }) }) : null,
+    h(ThinkingChoice, { slot: state.chairman, chair: true, caps, onChange: patch => upd({ chairman: { ...state.chairman, ...patch } }) }),
     h(ChairBrief, { guidance: chairGuidance, decision, tplNow, customBrief, onBrief: patch => upd(patch) }),
     h('div', { className: 'hc-hint' }, 'The chairman reads every answer, the blind critiques and any debate, then writes the verdict, keeps the dissent and lists next actions. ', h('b', null, 'When to use a strong model here: '), 'always; this one call shapes the result most.'),
     h('div', { className: 'hc-efoot' }, h('span', { className: 'hc-grow' }), h('button', { className: 'hc-btn2', onClick: () => setSel(null) }, 'Done'))))) : null]
@@ -1091,7 +1269,7 @@ function SetupView({ setup, models, onConvened, openHelp }) {
           h('div', { className: 'hc-evwrap' }, h(EvidencePanel, { state, upd, caps, stats })),
           stats.on.length || state.evidence?.trim() ? h('div', { className: 'hc-share' }, '⚠', h('span', null, `All ${nModels} models on this committee receive this evidence. Attach only what every participant may see.`)) : null)),
       h('div', { className: 'hc-panel', style: { minWidth: 0 } },
-        h('div', { className: 'hc-ph' }, 'Step 2 · Your committee', h('span', { className: 'hc-phr' }, h('button', { className: 'hc-link', onClick: openHelp }, '? How does this work'))),
+        h('div', { className: 'hc-ph' }, 'Step 2 · Your committee', h('span', { className: 'hc-phr' }, h('button', { className: 'hc-link hc-tint', onClick: openHelp }, '? How does this work'))),
         h('div', { className: 'hc-pb' },
           h('div', { className: 'hc-types' },
             setup.templates.map(t => h('button', { key: t.id, className: `hc-chip${state.source === t.id ? ' hc-on' : ''}`, onClick: () => pickTemplate(t), title: t.description }, t.title)),
@@ -1136,7 +1314,7 @@ function SetupView({ setup, models, onConvened, openHelp }) {
             isPreset && saveAs === null ? h('button', { className: `hc-btn2${confirmDel ? ' hc-danger' : ''}`, onClick: deletePreset,
               title: setup.rosters[state.source]?.source === 'config' ? 'This committee is in config.yaml: it is hidden here, config.yaml is not changed' : 'Delete this saved committee' },
               confirmDel ? `Click again to delete “${state.source}”` : '🗑') : null,
-            h('button', { className: 'hc-convene hc-convene-lg', disabled: busy, onClick: convene, title: problems[0] || 'Start the committee in its own chat' }, busy ? 'Convening…' : 'Convene the committee ▶')),
+            h('button', { className: `hc-convene hc-convene-lg${busy ? ' hc-busy' : ''}`, disabled: busy, onClick: convene, title: problems[0] || 'Start the committee in its own chat' }, busy ? busyLabel('Convening…') : ['Convene the committee', h('span', { key: 'i', className: 'hc-bic' }, '▶')])),
           problems.length && state.question.trim() ? h('div', { className: 'hc-xs hc-warn-t', style: { textAlign: 'right', marginTop: 6 } }, problems[0]) : null))))
 }
 
@@ -1148,6 +1326,7 @@ function InlineEditor({ slot, index, n, limits, models, locked, caps, pics, onCh
       h('div', null, h('label', { className: 'hc-elbl' }, 'AI model'), h(ModelPicker, { slot, models, locked, onPick: onChange }))),
     locked(slot.provider) ? h('div', { className: 'hc-xs hc-warn-t' }, '🔒 This provider needs your OK once. Convene will show you the command.') : null,
     pics ? h(PhotoChoice, { slot, caps, onChange }) : null,
+    h(ThinkingChoice, { slot, caps, onChange }),
     h('div', null,
       h('label', { className: 'hc-elbl' }, 'Instructions', h('span', { className: `hc-cnt${slot.instructions.length > MAX_INSTR ? ' hc-bad' : ''}` }, `${slot.instructions.length}/${MAX_INSTR}`)),
       h('textarea', { className: 'hc-in', rows: 4, dir: 'auto', value: slot.instructions, onChange: e => onChange({ instructions: e.target.value }), autoFocus: !!slot.name,
@@ -1160,6 +1339,20 @@ function InlineEditor({ slot, index, n, limits, models, locked, caps, pics, onCh
       h('button', { className: 'hc-link', disabled: n >= limits.max_seats, onClick: onDuplicate }, '⧉ Duplicate'),
       h('button', { className: 'hc-link hc-bad', disabled: n <= limits.min_seats, onClick: onRemove }, '✕ Remove seat'),
       h('span', { className: 'hc-grow' }), h('button', { className: 'hc-btn2', onClick: onClose }, 'Done')))
+}
+
+// How long the model thinks before it answers (a reasoning level). Medium unless changed; the clerical
+// steps (searches, passages, photo notes, the blind vote, listing disputes, debate replies) always run on low.
+function ThinkingChoice({ slot, chair, caps, onChange }) {
+  const refused = caps?.[`${slot.provider || ''}|${slot.model || ''}`]?.thinking === false
+  const opts = [['low', 'Low'], [undefined, 'Medium'], ['high', 'High'], ['default', 'Model default']]
+  return h('div', null, h('div', { className: 'hc-flbl' }, chair ? 'Thinking for the verdict' : 'Thinking for the answer'),
+    h('div', { className: 'hc-row hc-wrap' }, opts.map(([v, label]) => h('button', { key: String(v),
+      className: `hc-chip hc-chip-sm${slot.thinking === v ? ' hc-on' : ''}`, onClick: () => onChange({ thinking: v }) }, label))),
+    h('div', { className: 'hc-xs hc-muted', style: { marginTop: 4 } },
+      refused ? 'This model refused a thinking level before, so it runs on its own default whatever you pick. '
+        : 'How long the model reasons before it writes. Higher can be sharper but is slower and costs more; some models ignore it. ',
+      chair ? 'Picking sources and listing the disputes always run on Low.' : 'The blind vote and debate replies always run on Low.'))
 }
 
 function PhotoChoice({ slot, caps, onChange }) {
@@ -1327,15 +1520,53 @@ function LimitAlert({ run, sn }) {
         : h('button', { className: 'hc-link', onClick: () => setHidden(x => ({ ...x, [kind]: true })), title: 'Hide this. The committee still asks before it skips anything.' }, 'Not now')))
 }
 
+// After Research first, on a page run: the sources found, all ticked; untick any, then continue.
+function SourcesReview({ run, sn }) {
+  const ask = run.live?.sources
+  const items = run.web?.items || []
+  const [off, setOff] = useState({})
+  const [sent, setSent] = useState(null)
+  const [busy, setBusy] = useState(false)
+  if (!run.draft || !sn.live || !ask || !items.length) return null
+  if (sent === ask.since) return h('div', { className: 'hc-alert hc-alert-sent' }, 'Sent · the seats start in a moment…')
+  const nowAbs = (run.created || 0) + sn.t
+  const keep = items.filter(x => !off[x.id]).map(x => x.id)
+  const go = async ids => {
+    setBusy(true)
+    try {
+      const r = await rest(`/runs/${run.id}/sources`, { method: 'POST', body: { keep: ids } })
+      if (r.ok === false) notify('warning', r.note || 'The run is no longer waiting.')
+      setSent(ask.since)
+      queryClient.invalidateQueries({ queryKey: [...KEY, 'run', run.id] })
+    } catch (e) { notify('error', `Could not send: ${e.message || e}`) }
+    finally { setBusy(false) }
+  }
+  return h('div', { className: 'hc-alert hc-alert-src', role: 'dialog', 'aria-label': 'Review the web sources' },
+    h('b', null, `🌐 ${items.length} web source${items.length === 1 ? '' : 's'} found · review before the seats start`),
+    h('div', { className: 'hc-xs' }, `Untick anything you do not trust. Continues with every ticked source in ${Math.max(0, Math.ceil(ask.until - nowAbs))} s; paused time does not count.`),
+    h('div', { className: 'hc-srclist' }, items.map(x => h('label', { key: x.id, className: `hc-src${off[x.id] ? ' hc-src-off' : ''}` },
+      h('input', { type: 'checkbox', checked: !off[x.id], onChange: () => setOff(o => ({ ...o, [x.id]: !o[x.id] })) }),
+      h('div', { style: { minWidth: 0 } },
+        h('div', { className: 'hc-row', style: { gap: 6 } }, h('b', { className: 'hc-mono hc-xs' }, x.id), h('span', { className: 'hc-ellipsis hc-sm', title: x.title }, x.title)),
+        h('div', { className: 'hc-xs hc-muted hc-ellipsis' }, h('a', { href: x.url, target: '_blank', rel: 'noreferrer', title: x.url }, x.site), x.why ? ` · ${x.why}` : ''),
+        h('div', { className: 'hc-xs hc-srcq', dir: 'auto' }, `“${fit(x.excerpt, 200)}”`))))),
+    h('div', { className: 'hc-alert-btns' },
+      h('button', { className: 'hc-btn2', disabled: busy, onClick: () => go(keep) }, keep.length === items.length ? 'Continue with all' : `Continue with ${keep.length}`),
+      h('span', { className: 'hc-xs hc-muted' }, 'Web text is marked unverified for the seats.')))
+}
+
 function StagesPanel({ run, sn, live, replay, stopping, onStop, onReplay, onEndReplay }) {
   const n = (run.seats || []).length
   const dl = run.deliberation || {}
   const delibOn = run.deliberate && run.deliberate !== 'never'
   const answered = Object.values(sn.seats).filter(s => s.a === 'ok').length
-  const order = ['stage1', 'review', ...(delibOn ? ['deliberate'] : []), 'chair']
+  const order = [...(run.research ? ['research'] : []), 'stage1', 'review', ...(delibOn ? ['deliberate'] : []), 'chair']
   const cur = sn.stage === 'done' || sn.stage === 'stopped' ? order.length : Math.max(0, order.indexOf(sn.stage))
   const skippedReview = run.skipped?.review
+  const webN = (run.web?.items || []).length
   const items = [
+    ...(run.research ? [['Research', sn.stage === 'research' ? (sn.researching === 'review' ? 'review sources' : 'searching')
+      : run.web ? (webN ? `${webN} source${webN === 1 ? '' : 's'}` : 'none') : '', sn.stage === 'research' ? 0.5 : 1, !!run.web && !webN && sn.stage !== 'research']] : []),
     ['Independent answers', `${answered}/${n}`, answered / Math.max(1, n)],
     ['Blind vote', !run.review ? 'off' : skippedReview ? `skipped · ${skippedReview}` : cur >= 1 ? `${sn.ballots.length}/${Math.max(sn.okSeats.length, 1)}` : '',
       !run.review || skippedReview ? 1 : sn.ballots.length / Math.max(1, sn.okSeats.length), !run.review || !!skippedReview],
@@ -1369,6 +1600,7 @@ function StagesPanel({ run, sn, live, replay, stopping, onStop, onReplay, onEndR
         title: `Estimated from token counts and list prices, updated as each call finishes. Subscription calls count $0.${tot.unknown_calls ? ` ${tot.unknown_calls} call(s) have no known price and are not counted.` : ''}` }),
       h(Tile, { label: 'Calls', value: tot.calls || 0, note: 'finished', title: 'Model calls that have finished' }),
       h(Tile, { label: 'Tokens', value: fmtTokens(tot.tokens || 0), note: 'in + out', title: 'Input and output tokens of the finished calls' })),
+    live && !replay ? h(SourcesReview, { run, sn }) : null,
     live && !replay ? h(LimitAlert, { run, sn }) : null,
     h('div', { className: 'hc-ctl' },
       live ? h('button', { className: 'hc-stop', disabled: stopping, onClick: onStop }, stopping ? 'Stopping…' : '⏹ Stop committee') : null,
@@ -1395,6 +1627,11 @@ function NowPanel({ run, sn, onDecision }) {
   } else if (sn.stage === 'stopped') {
     body = [K(run.status === 'cancelled' ? 'Stopped' : run.stale ? 'Abandoned' : 'No verdict'),
       h('div', { className: 'hc-sm' }, run.error || (run.status === 'cancelled' ? 'The committee was stopped. No further model calls were started.' : 'The chat that ran this committee ended before it finished.'))]
+  } else if (sn.stage === 'research') {
+    body = sn.researching === 'review'
+      ? [K('Research first · your review'), big('Untick any source you do not trust.', h('br'), h('span', { className: 'hc-xs hc-muted' }, 'The seats start when you continue.'))]
+      : [K('Research first'), big('Searching the web once,', h('br'), 'the same facts for every seat.'),
+        h('div', { className: 'hc-xs hc-muted', style: { marginTop: 8 } }, fit(String(sn.researching || ''), 90))]
   } else if (sn.describing) {
     body = [K('Preparing the evidence'), big('Describing the pictures', h('br'), h('span', { className: 'hc-xs hc-muted' }, 'so seats that cannot see photos get a written description.'))]
   } else if (sn.stage === 'stage1') {
@@ -1423,10 +1660,10 @@ function NowPanel({ run, sn, onDecision }) {
   } else body = [K('Waiting'), big('The next stage starts in a moment.')]
   return h('div', { className: `hc-panel hc-narr${sn.stage === 'done' || sn.stage === 'stopped' ? ' hc-idle' : ''}` },
     h('div', { className: 'hc-ph' }, 'Now', h('span', { className: 'hc-phr' }, h('span', { className: 'hc-pulse2' }))),
-    h('div', { className: 'hc-nb', key: `${sn.stage}-${sn.chair}-${sn.ranked}-${sn.describing}-${!!run.live?.ask}` }, ...body))
+    h('div', { className: 'hc-nb', key: `${sn.stage}-${sn.chair}-${sn.ranked}-${sn.describing}-${sn.researching === 'review'}-${!!run.live?.ask}` }, ...body))
 }
 
-const LANE_CLS = { stage1: 'a', review: 'v', deliberate: 'd', chair: 'c' }
+const LANE_CLS = { research: 'web', stage1: 'a', review: 'v', deliberate: 'd', chair: 'c' }
 // The axis length: the first round length that fits. It changes only when the run outgrows it, so bars never
 // drift; quarter ticks fall on round times (0:30, 1:00 …).
 const tickStep = need => (need <= 150 ? 30 : need <= 330 ? 60 : need <= 660 ? 120 : need <= 1500 ? 300 : need <= 2400 ? 600 : 900)
@@ -1453,7 +1690,7 @@ function Timeline({ run, sn }) {
   const liveText = r => {
     const ls = sn.lanes.filter(b => b.who === r.who)
     const cur = ls.find(b => b.running)
-    if (cur) return `${{ stage1: 'answering', review: 'ranking', deliberate: r.who === 'chair' ? 'listing points' : 'replying', chair: 'writing the verdict' }[cur.stage]} · ${clock(cur.shown)}`
+    if (cur) return `${{ research: 'researching', stage1: 'answering', review: 'ranking', deliberate: r.who === 'chair' ? 'listing points' : 'replying', chair: 'writing the verdict' }[cur.stage]} · ${clock(cur.shown)}`
     if (r.who === 'chair') return sn.chair === 'ok' ? `→ ${fit(clause(run.chair?.decision || ''), 40)}` : shortModel(r.model) || 'active model'
     const S = sn.seats[r.who] || {}
     if (S.a === 'fail') return 'no answer'
@@ -1468,11 +1705,11 @@ function Timeline({ run, sn }) {
       rows.map(r => h('div', { key: r.who, className: 'hc-lane' },
         h('div', { className: 'hc-who' }, h('b', { className: 'hc-ellipsis' }, r.name), h('span', { className: 'hc-live hc-ellipsis' }, liveText(r))),
         h('div', { className: 'hc-rail' }, sn.lanes.filter(b => b.who === r.who).map((b, i) => h('i', { key: i, className: `hc-${LANE_CLS[b.stage] || 'c'}${b.running ? ' hc-running' : ''}`,
-          title: `${{ stage1: 'Answer', review: 'Blind vote', deliberate: 'Debate', chair: 'Verdict' }[b.stage]} · ${b.running ? 'running' : `${fmtSecs(b.secs)} · ${fmtNum(b.tokens)} tokens`}`,
+          title: `${{ research: 'Research', stage1: 'Answer', review: 'Blind vote', deliberate: 'Debate', chair: 'Verdict' }[b.stage]} · ${b.running ? 'running' : `${fmtSecs(b.secs)} · ${fmtNum(b.tokens)} tokens`}`,
           style: { left: pct(b.start), width: pct(Math.max(span * 0.004, b.shown)) } }))),
         h('div', { className: 'hc-tok' }, r.who === 'chair' ? fmtNum(sn.chairLanes.filter(b => !b.running).reduce((x, b) => x + (b.tokens || 0), 0)) : fmtNum(sn.seats[r.who]?.tokens || 0)))),
       sn.live || (sn.replaying && !sn.ended) ? h('div', { className: 'hc-nowline', style: { left: `calc(16px + 170px + (100% - 32px - 242px) * ${Math.min(1, sn.t / span)})` } }) : null),
-    h('div', { className: 'hc-legend' }, [['a', 'answer'], ['v', 'blind vote'], ['d', 'debate'], ['c', 'chairman']].map(([k, l]) => h('span', { key: k }, h('i', { className: `hc-${k}` }), l))))
+    h('div', { className: 'hc-legend' }, [...(run.research ? [['web', 'research']] : []), ['a', 'answer'], ['v', 'blind vote'], ['d', 'debate'], ['c', 'chairman']].map(([k, l]) => h('span', { key: k }, h('i', { className: `hc-${k}` }), l))))
 }
 
 const LOG_CLS = { start: 'k', answer: 'ok', fail: 'r', ballot: 't', ranking: 'ok', skip: 'w', agenda: 'w', reply: 'k', verdict: 'ok', stop: 'r' }
@@ -1521,8 +1758,8 @@ function FollowUpDialog({ run, onClose, onStarted }) {
   const [useFiles, setUseFiles] = useState(true)
   const [busy, setBusy] = useState(false)
   const nFiles = (run.files || []).length
-  const fseats = (run.seats || []).map(s => ({ name: s.name, provider: s.provider || '', model: s.model || '', ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}) }))
-  const fchair = { provider: run.chairman?.provider || '', model: run.chairman?.model || '' }
+  const fseats = (run.seats || []).map(s => ({ name: s.name, provider: s.provider || '', model: s.model || '', ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}), ...(s.thinking ? { thinking: s.thinking } : {}) }))
+  const fchair = { provider: run.chairman?.provider || '', model: run.chairman?.model || '', ...(run.chairman?.thinking ? { thinking: run.chairman.thinking } : {}) }
   const [ev, setEv] = useState({ files: [], pack: null, evidence: '', seats: fseats })
   const [showEv, setShowEv] = useState(false)
   const updEv = patch => setEv(s => ({ ...s, ...(typeof patch === 'function' ? patch(s) : patch) }))
@@ -1535,11 +1772,11 @@ function FollowUpDialog({ run, onClose, onStarted }) {
     if (evStats.pics && !evStats.describer) { notify('warning', 'The new photos need a model that can see pictures. Remove them, or set up a new committee with a vision model.'); return }
     setBusy(true)
     try {
-      const body = { question: q.trim(), title: title.trim(), template: run.template, review: run.review, deliberate: run.deliberate || "never", deliberate_rounds: run.deliberate_rounds || 1,
+      const body = { question: q.trim(), title: title.trim(), template: run.template, review: run.review, research: !!run.research, deliberate: run.deliberate || "never", deliberate_rounds: run.deliberate_rounds || 1,
         ...(run.custom_brief ? { chairman_guidance: run.chairman_guidance, decision_focus: !!run.decision_focus } : {}),
-        chairman: { provider: run.chairman?.provider || '', model: run.chairman?.model || '' },
+        chairman: fchair,
         seats: (run.seats || []).map(s => ({ name: s.name, instructions: s.instructions || '', provider: s.provider || '', model: s.model || '',
-          ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}) })),
+          ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}), ...(s.thinking ? { thinking: s.thinking } : {}) })),
         max_minutes: mins, max_usd: run.limits?.max_usd || 0, allow_unknown_price: !!(run.estimate?.unknown || []).length,
         follow_of: run.id, follow_context: useCtx, follow_evidence: useFiles && nFiles > 0,
         ...(ev.evidence?.trim() ? { evidence: ev.evidence } : {}),
@@ -1576,7 +1813,7 @@ function FollowUpDialog({ run, onClose, onStarted }) {
         `Same limits: ${mins ? `⏱ ${mins} min` : '⏱ no time limit'} · ${run.limits?.max_usd ? `💲 ${usd(run.limits.max_usd)}` : '💲 no budget'}. To change the seats or the limits, use 💾 Save committee, then set up a new one from it.`),
       h('div', { className: 'hc-row hc-dlgfoot' }, h('span', { className: 'hc-grow' }),
         h(Button, { size: 'sm', variant: 'ghost', onClick: onClose, disabled: busy }, 'Cancel'),
-        h('button', { className: 'hc-convene', disabled: busy, onClick: go }, busy ? 'Convening…' : 'Convene follow-up ▶'))))
+        h('button', { className: `hc-convene${busy ? ' hc-busy' : ''}`, disabled: busy, onClick: go }, busy ? busyLabel('Convening…') : ['Convene follow-up', h('span', { key: 'i', className: 'hc-bic' }, '▶')]))))
 }
 
 function SeatAnswer({ run, label, onClose }) {
@@ -1593,6 +1830,8 @@ function SeatAnswer({ run, label, onClose }) {
       h('div', { className: 'hc-grow', style: { minWidth: 0 } }, h('b', { className: 'hc-ellipsis', style: { display: 'block' } }, s.name),
         h('div', { className: 'hc-xs hc-muted hc-ellipsis' }, `${shortModel(s.model) || 'active model'} · ${fmtSecs(run.seconds?.stage1?.[label])}`)),
       h('button', { className: 'hc-link', onClick: onClose }, '✕')),
+    roleFit(run, label) ? h('div', { className: `hc-sm ${roleFit(run, label).fit === 'drifted' ? 'hc-warn-t' : 'hc-muted'}`, dir: 'auto' },
+      `Role (chairman’s note): ${roleFit(run, label).fit === 'drifted' ? 'drifted' : 'kept to it'}${roleFit(run, label).note ? ` · ${roleFit(run, label).note}` : ''}`) : null,
     h('div', { className: 'hc-row hc-wrap' },
       r ? h('span', { className: 'hc-chip hc-static hc-on' }, `#${pos + 1} by peers`) : null,
       r ? h('span', { className: 'hc-chip hc-static' }, `${r.first_votes} first-place vote${r.first_votes === 1 ? '' : 's'}`) : null,
@@ -1672,6 +1911,9 @@ function DecisionView({ run, onReplay, openChat, onFollow, openHelp }) {
         h('div', { className: 'hc-kicker' }, `The committee’s ${run.decision_focus === false ? 'answer' : 'decision'} · ${run.template_title} · ${date}`),
         run.title ? h('div', { className: 'hc-runtitle', dir: 'auto' }, run.follow_of ? `↪ ${run.title}` : run.title) : null,
         h('div', { className: 'hc-qsmall', dir: 'auto' }, run.follow_of && !run.title ? `↪ Follow-up · ${run.question}` : run.question),
+        run.background ? h('details', { className: 'hc-bg' },
+          h('summary', { title: 'Context added to your question before the seats answered. It was sent to every seat’s provider.' }, 'Background given to the seats'),
+          h('div', { className: 'hc-xs', dir: 'auto' }, run.background)) : null,
         h('h1', { className: 'hc-h1', dir: 'auto' }, c.decision || '—'),
         run.exec?.bottom_line ? h('p', { className: 'hc-bl', dir: 'auto', title: run.exec.assembled ? 'Taken from the chairman’s answer (this run has no written executive summary)' : 'The chairman’s executive summary' },
           run.exec.change ? h('b', null, `${run.exec.change}. `) : null, run.exec.bottom_line) : null,
@@ -1713,10 +1955,14 @@ function DecisionView({ run, onReplay, openChat, onFollow, openHelp }) {
         : h('div', { className: 'hc-sm hc-muted' }, 'The chairman named nothing that would reverse it.')))),
     h('div', { className: 'hc-lower' },
       panel('How the table stood', null,
-        h(MiniArc, { height: 190, seats: seats.map(s => ({ key: s.label, name: s.name, stance: stances[s.label] || (run.answers?.[s.label]?.status === 'failed' ? 'failed' : ''),
-          title: `${s.name} · ${shortModel(s.model) || 'active model'}${stances[s.label] === 'dissent' ? ' · dissent' : stances[s.label] === 'agree' ? ' · in line with the decision' : ''}` })) }),
+        h(MiniArc, { height: 190, seats: seats.map(s => { const rf = roleFit(run, s.label); return { key: s.label, name: s.name, stance: stances[s.label] || (run.answers?.[s.label]?.status === 'failed' ? 'failed' : ''),
+          drift: rf?.fit === 'drifted',
+          title: `${s.name} · ${shortModel(s.model) || 'active model'}${stances[s.label] === 'dissent' ? ' · dissent' : stances[s.label] === 'agree' ? ' · in line with the decision' : ''}${rf ? `\nRole: ${rf.fit === 'drifted' ? 'drifted' : 'kept'}${rf.note ? ` · ${rf.note}` : ''}` : ''}` } }) }),
         h('div', { className: 'hc-legend2' }, h('span', null, h('i', { style: { background: 'var(--hc-ok)' } }), 'In line with the decision'),
-          h('span', null, h('i', { style: { background: 'var(--hc-warn)' } }), 'Dissent'), h('span', null, h('i', { style: { background: 'var(--hc-acc)' } }), 'Chair'))),
+          h('span', null, h('i', { style: { background: 'var(--hc-warn)' } }), 'Dissent'), h('span', null, h('i', { style: { background: 'var(--hc-acc)' } }), 'Chair'),
+          ((run.chair || {}).role_fit || []).some(x => x.fit === 'drifted')
+            ? h('span', { title: 'The chairman found this seat mostly answered outside its role. Hover the seat for the reason; rewrite its instructions if it keeps happening.' },
+              h('b', { className: 'hc-drift-k' }, '!'), 'Drifted from role') : null)),
       h('div', { className: 'hc-panel' },
         h('div', { className: 'hc-ph' }, 'Blind ranking', h('span', { className: 'hc-phr' }, R.length ? 'average rank · lower is better' : '')),
         R.length ? h('div', { className: 'hc-pb hc-rbars' }, R.map(x => h('div', { key: x.label, className: 'hc-rrowb' },
@@ -1732,7 +1978,7 @@ function DecisionTabs({ run, tab, setTab, openHelp }) {
   const dl = run.deliberation || {}
   const [open, setOpen] = useState(null)
   const tabs = [['answers', 'Answers ranked'], ...(run.deliberate && run.deliberate !== 'never' ? [['debate', dl.rounds?.length ? `Debate (${dl.disputes.length})` : 'Debate']] : []),
-    ['dissent', `Dissent (${(c.dissent || []).length})`], ['insights', 'Insights'], ['cost', 'Time & cost'], ['more', 'Agreement'], ['final', 'Full answer']]
+    ['dissent', `Dissent (${(c.dissent || []).length})`], ...(run.research ? [['sources', `Web sources (${(run.web?.items || []).length})`]] : []), ['insights', 'Insights'], ['cost', 'Time & cost'], ['more', 'Agreement'], ['final', 'Full answer']]
   let body
   if (tab === 'answers') {
     const order = (run.ranking || []).length ? run.ranking.map(r => r.label) : seatList(run).map(s => s.label)
@@ -1743,9 +1989,20 @@ function DecisionTabs({ run, tab, setTab, openHelp }) {
       return h('button', { key: l, className: 'hc-ansrow', onClick: () => setOpen(l), title: 'Read this seat’s answer' },
         h('span', { className: 'hc-rk' }, (run.ranking || []).length ? i + 1 : '·'),
         h('div', { style: { minWidth: 0 } }, h('b', { className: 'hc-ellipsis', style: { display: 'block' } }, s.name), h('div', { className: 'hc-xs hc-muted hc-mono hc-ellipsis' }, shortModel(s.model) || 'active model')),
-        h('div', { dir: 'auto' }, a.status === 'ok' ? a.summary : h('span', { className: 'hc-warn-t' }, `No answer (${a.error || 'not run'})`)))
+        h('div', { dir: 'auto' }, roleFit(run, l)?.fit === 'drifted' ? h('span', { className: 'hc-drift-tag', title: roleFit(run, l).note }, 'drifted from role') : null,
+          a.status === 'ok' ? a.summary : h('span', { className: 'hc-warn-t' }, `No answer (${a.error || 'not run'})`)))
     })
   } else if (tab === 'debate') body = h(DeliberationTab, { run })
+  else if (tab === 'sources') {
+    const web = run.web || {}
+    body = (web.items || []).length ? h('div', { className: 'hc-pb' },
+      h('div', { className: 'hc-xs hc-muted', style: { marginBottom: 8 } }, `Found by one web search before the seats answered${web.accessed ? ` (${web.accessed})` : ''}; every seat got the same passages, marked unverified.${web.dropped ? ` You unticked ${web.dropped}.` : ''}`),
+      web.items.map(x => h('div', { key: x.id, className: 'hc-srcrow' },
+        h('div', null, h('b', { className: 'hc-mono hc-xs' }, x.id), ' ', h('a', { href: x.url, target: '_blank', rel: 'noreferrer' }, x.title), h('span', { className: 'hc-xs hc-muted' }, ` · ${x.site}`)),
+        h('div', { className: 'hc-sm hc-srcq', dir: 'auto' }, `“${x.excerpt}”`))),
+      (web.queries || []).length ? h('div', { className: 'hc-xs hc-muted', style: { marginTop: 8 } }, `Searched: ${web.queries.join(' · ')}`) : null)
+      : h('div', { className: 'hc-pb hc-sm hc-muted' }, web.note || 'No web sources were added.')
+  }
   else if (tab === 'dissent') {
     body = (c.dissent || []).length ? c.dissent.map((d, i) => h('div', { key: i, style: { marginBottom: 14 } },
       h('p', { className: 'hc-dissent', dir: 'auto' }, `“${d.view}”`), h('div', { className: 'hc-xs hc-muted', style: { marginTop: 6 } }, d.name || nameOf(run, d.label))))
@@ -1755,19 +2012,24 @@ function DecisionTabs({ run, tab, setTab, openHelp }) {
     body = h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
       items.length ? items.map((x, i) => h('div', { key: i, className: 'hc-insight' }, h('span', null, INSIGHT_ICON[x.kind] || '•'), h('div', null, h('b', null, `${x.title}. `), x.text)))
         : h('div', { className: 'hc-sm hc-muted' }, 'Nothing unusual in this run.'),
-      h('button', { className: 'hc-link', style: { alignSelf: 'flex-start' }, onClick: openHelp }, '? How to read this'))
+      h('button', { className: 'hc-link hc-tint', style: { alignSelf: 'flex-start' }, onClick: openHelp }, '? How to read this'))
   } else if (tab === 'cost') {
     const tot = run.totals || {}, lim = run.limits || {}, u = usageTotals(run)
     const per = l => (run.lanes || []).filter(b => b.who === l && !b.running)
+    // The thinking level of the call each row controls (a seat's answer, the chairman's verdict); the clerical calls ran on low.
+    const thinkOf = l => { const who = l === 'chair' ? 'Chairman' : (run.seats || []).find(s => s.label === l)?.name
+      const u = (run.usage || []).find(x => x.who === who && x.stage === (l === 'chair' ? 'chair' : 'stage1') && x.thinking)
+      return u ? (u.thinking === 'default' ? 'model default' : u.thinking) : '—' }
     const row = (k, v) => h('div', { className: 'hc-ansrow hc-static' }, h('span'), h('b', null, k), h('div', null, v))
     body = h(Fragment, null,
       row('Time', `${fmtSecs(run.summary?.elapsed ?? runEnd(run))}${lim.max_secs ? ` of a ${Math.round(lim.max_secs / 60)} min limit` : ' · no time limit'}`),
       row('Calls', `${tot.calls || 0} · ${fmtNum(tot.tokens || 0)} tokens (${fmtTokens(u.input)} in · ${fmtTokens(u.output)} out)`),
       row('Estimated cost', `${usd(tot.cost_usd || 0)}${lim.max_usd ? ` of ${usd(lim.max_usd)}` : ''}${tot.subscription_calls ? ` · ${tot.subscription_calls} subscription call${tot.subscription_calls === 1 ? '' : 's'} count $0` : ''}${tot.unknown_calls ? ` · ${tot.unknown_calls} call${tot.unknown_calls === 1 ? '' : 's'} with no known price, not counted` : ''}${u.list > (u.est || 0) ? ` · at list price ${usd(u.list)}` : ''}`),
-      h('table', { className: 'hc-tbl', style: { marginTop: 12 } }, h('thead', null, h('tr', null, h('th', null, 'Seat'), h('th', null, 'Calls'), h('th', null, 'Time'), h('th', { style: { textAlign: 'right' } }, 'Tokens'))),
+      h('table', { className: 'hc-tbl', style: { marginTop: 12 } }, h('thead', null, h('tr', null, h('th', null, 'Seat'), h('th', null, 'Calls'), h('th', null, 'Time'), h('th', { title: 'Thinking level for the seat’s answer or the chairman’s verdict. The other steps ran on low.' }, 'Thinking'), h('th', { style: { textAlign: 'right' } }, 'Tokens'))),
         h('tbody', null, [...seatList(run).map(s => s.label), 'chair'].map(l => {
           const ls = per(l)
           return h('tr', { key: l }, h('td', null, nameOf(run, l)), h('td', { className: 'hc-mono hc-xs' }, ls.length), h('td', { className: 'hc-mono hc-xs' }, fmtSecs(ls.reduce((x, b) => x + b.secs, 0))),
+            h('td', { className: 'hc-xs' }, thinkOf(l)),
             h('td', { className: 'hc-mono hc-xs', style: { textAlign: 'right' } }, fmtNum(ls.reduce((x, b) => x + b.tokens, 0))))
         }))),
       h('div', { className: 'hc-xs hc-muted', style: { marginTop: 8 } }, 'An estimate from token counts and list prices, not your provider’s bill.'))
@@ -1882,7 +2144,7 @@ function CommitteePage() {
         title: on ? '' : i === 1 ? 'Convene a committee, or open one from History' : 'The decision appears when a committee finishes' },
         h('i', null, i < cur ? '✓' : i + 1), label))),
       h('div', { className: 'hc-hstat' },
-        h('button', { className: 'hc-link', onClick: () => setHelp(true) }, '? Help'),
+        h('button', { className: 'hc-link hc-tint', onClick: () => setHelp(true) }, '? Help'),
         h('div', { className: 'hc-hist' },
           h('button', { className: 'hc-btn2 hc-btn-sm', onClick: () => setHist(!hist) }, `🕘 History${runs.length ? ` (${runs.length})` : ''} ▾`),
           hist ? h(HistoryMenu, { runs, onClose: () => setHist(false), onOpen: id => { setHist(false); openRun(id) }, onStandings: () => { setHist(false); setStandings(true) } }) : null))),
@@ -1892,10 +2154,10 @@ function CommitteePage() {
 }
 
 const CSS = `
-.hc-root{--hc-bg:var(--ui-bg-editor,#0e1014);--hc-panel:var(--ui-bg-secondary,#15181f);--hc-panel2:var(--ui-bg-tertiary,color-mix(in srgb,var(--hc-panel) 86%,var(--hc-fg)));--hc-line:var(--ui-stroke-secondary,#282d38);--hc-line2:color-mix(in srgb,var(--hc-line) 62%,var(--hc-fg));--hc-fg:var(--ui-text-primary,#ece8df);--hc-fg2:var(--ui-text-secondary,color-mix(in srgb,var(--hc-fg) 84%,var(--hc-bg)));--hc-mut:var(--ui-text-tertiary,#9a978e);--hc-acc:var(--ui-accent,#cfa94f);--hc-ok:var(--ui-success,#74c897);--hc-warn:var(--ui-yellow,#e8b155);--hc-bad:var(--dt-destructive,#e07563);--hc-ans:#6fb3d9;--hc-vote:#a690e6;--hc-deb:#e07563;--hc-serif:Georgia,"Times New Roman",serif;--hc-mono:"Cascadia Mono",Consolas,ui-monospace,monospace;--hc-solid:var(--ui-bg-elevated,var(--hc-bg));
+.hc-root{--hc-bg:var(--ui-bg-editor,#0e1014);--hc-panel:var(--ui-bg-secondary,#15181f);--hc-panel2:var(--ui-bg-tertiary,color-mix(in srgb,var(--hc-panel) 86%,var(--hc-fg)));--hc-line:var(--ui-stroke-secondary,#282d38);--hc-line2:color-mix(in srgb,var(--hc-line) 62%,var(--hc-fg));--hc-fg:var(--ui-text-primary,#ece8df);--hc-fg2:var(--ui-text-secondary,color-mix(in srgb,var(--hc-fg) 84%,var(--hc-bg)));--hc-mut:var(--ui-text-tertiary,#9a978e);--hc-acc:var(--ui-accent,#cfa94f);--hc-ok:var(--ui-success,#74c897);--hc-warn:var(--ui-yellow,#e8b155);--hc-bad:var(--dt-destructive,#e07563);--hc-ans:#6fb3d9;--hc-vote:#a690e6;--hc-deb:#e07563;--hc-web:#5fbfae;--hc-serif:Georgia,"Times New Roman",serif;--hc-mono:"Cascadia Mono",Consolas,ui-monospace,monospace;--hc-solid:var(--ui-bg-elevated,var(--hc-bg));
   height:100%;overflow:auto;padding:0 0 48px;font-size:13px;line-height:1.45;color:var(--hc-fg);position:relative}
 .hc-root{--hc-m1:62%;--hc-m2:36%;--hc-m3:45%;--hc-m4:50%}
-.hc-root[data-scheme=light]{--hc-ans:#1c78b5;--hc-vote:#9b3fc4;--hc-deb:#c2402f;--hc-m1:78%;--hc-m2:52%;--hc-m3:62%;--hc-m4:66%}
+.hc-root[data-scheme=light]{--hc-ans:#1c78b5;--hc-vote:#9b3fc4;--hc-deb:#c2402f;--hc-web:#14826f;--hc-m1:78%;--hc-m2:52%;--hc-m3:62%;--hc-m4:66%}
 .hc-mono{font-family:var(--hc-mono)}
 .hc-top{display:flex;align-items:center;gap:20px;padding:10px 26px;border-bottom:1px solid var(--hc-line);position:sticky;top:0;z-index:25;background:color-mix(in srgb,var(--hc-bg) 92%,transparent);backdrop-filter:blur(8px)}
 .hc-logo2{font-family:var(--hc-serif);font-size:18px;white-space:nowrap}.hc-logo2 b{color:var(--hc-acc);font-weight:400}
@@ -1937,6 +2199,10 @@ const CSS = `
 .hc-mseat:hover circle,.hc-mseat.hc-sel circle{stroke:var(--hc-acc)}
 .hc-mseat text{fill:var(--hc-fg);font-size:11px;text-anchor:middle;dominant-baseline:central}
 .hc-mchair rect{fill:color-mix(in srgb,var(--hc-acc) 15%,var(--hc-panel));stroke:var(--hc-acc);stroke-width:1.5}.hc-mchair.hc-sel rect{stroke-width:2.5}
+.hc-drift circle{fill:var(--hc-warn);stroke:var(--hc-panel);stroke-width:1.5}
+.hc-drift text{fill:var(--hc-panel);font-size:8px;font-weight:700}
+.hc-drift-k{display:inline-grid;place-items:center;width:12px;height:12px;border-radius:50%;background:var(--hc-warn);color:var(--hc-panel);font-size:9px;margin-right:6px}
+.hc-drift-tag{display:inline-block;margin-right:6px;padding:0 6px;border-radius:8px;font-size:10.5px;color:var(--hc-warn);border:1px solid color-mix(in srgb,var(--hc-warn) 50%,transparent)}
 .hc-mseat.hc-agree circle{stroke:var(--hc-ok);fill:color-mix(in srgb,var(--hc-ok) 14%,var(--hc-panel))}
 .hc-mseat.hc-dissent circle{stroke:var(--hc-warn);fill:color-mix(in srgb,var(--hc-warn) 14%,var(--hc-panel))}
 .hc-mseat.hc-failed circle{stroke-dasharray:3 3;opacity:.6}
@@ -2001,6 +2267,17 @@ const CSS = `
 .hc-tbar-off{visibility:hidden}
 .hc-tbar i{display:block;height:100%;border-radius:2px;transition:width .5s linear}
 .hc-tn{font-size:11px;color:var(--hc-mut);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hc-research{display:flex;gap:10px;align-items:flex-start;margin-top:10px;padding-top:10px;border-top:1px dashed var(--hc-line)}
+.hc-research>div{display:flex;flex-direction:column;gap:3px;min-width:0}
+.hc-alert-src{background:color-mix(in srgb,var(--hc-acc) 10%,var(--hc-panel));border-color:color-mix(in srgb,var(--hc-acc) 45%,transparent)}
+.hc-alert-src b{color:var(--hc-fg)}
+.hc-srclist{display:flex;flex-direction:column;gap:6px;max-height:260px;overflow:auto;margin:2px 0}
+.hc-src{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;border-radius:8px;background:var(--hc-panel);border:1px solid var(--hc-line);cursor:pointer}
+.hc-src input{margin-top:3px}
+.hc-src-off{opacity:.5}
+.hc-srcq{color:var(--hc-fg);opacity:.85;margin-top:2px}
+.hc-srcrow{padding:8px 0;border-bottom:1px solid var(--hc-line)}
+.hc-srcrow:last-child{border-bottom:0}
 .hc-alert{margin:0 16px 12px;padding:10px 12px;border-radius:10px;display:flex;flex-direction:column;gap:5px;font-size:12.5px;background:color-mix(in srgb,var(--hc-warn) 13%,var(--hc-panel));border:1px solid color-mix(in srgb,var(--hc-warn) 50%,transparent);animation:hc-fade .3s}
 .hc-alert b{color:color-mix(in srgb,var(--hc-warn) 75%,var(--hc-fg));font-weight:650}
 .hc-alert-ask{border-width:2px;animation:hc-fade .3s,hc-alertpulse 1.6s ease-in-out infinite}
@@ -2023,7 +2300,7 @@ const CSS = `
 .hc-see{margin-top:14px;width:100%}
 .hc-pulse2{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--hc-acc);animation:hc-breathe 1.4s infinite}
 .hc-idle .hc-pulse2{animation:none;background:var(--hc-ok)}
-.hc-stagewrap{position:relative;aspect-ratio:980/650}
+.hc-stagewrap{position:relative;aspect-ratio:980/712}
 .hc-room{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
 .hc-orbit{fill:none;stroke:color-mix(in srgb,var(--hc-acc) 25%,var(--hc-line));stroke-width:1.5;stroke-dasharray:2 7}
 .hc-spoke{stroke:var(--hc-line2);stroke-width:1.5;opacity:.7}.hc-spoke.hc-lit{stroke:color-mix(in srgb,var(--hc-acc) 45%,var(--hc-line))}
@@ -2073,7 +2350,7 @@ const CSS = `
 .hc-rail i{position:absolute;top:0;height:100%;border-radius:3px;min-width:2px;transition:left .6s ease,width .6s ease}
 .hc-rail i.hc-running{transition:left .6s ease,width .5s linear}
 .hc-rail i.hc-running{background-image:linear-gradient(90deg,transparent 60%,color-mix(in srgb,#fff 35%,transparent));background-blend-mode:overlay}
-.hc-a{background:var(--hc-ans)}.hc-v{background:var(--hc-vote)}.hc-d{background:var(--hc-deb)}.hc-c{background:var(--hc-acc)}
+.hc-a{background:var(--hc-ans)}.hc-v{background:var(--hc-vote)}.hc-d{background:var(--hc-deb)}.hc-web{background:var(--hc-web)}.hc-c{background:var(--hc-acc)}
 .hc-tok{font:11px var(--hc-mono);color:var(--hc-mut);text-align:right}
 .hc-nowline{position:absolute;top:32px;bottom:10px;width:1px;background:var(--hc-acc);opacity:.7;transition:left .3s linear;pointer-events:none}
 .hc-legend{display:flex;gap:14px;padding:0 16px 12px;font-size:11px;color:var(--hc-mut)}
@@ -2146,6 +2423,9 @@ const CSS = `
 .hc-guide{padding:14px 16px;margin-bottom:12px;background:linear-gradient(135deg,color-mix(in srgb,var(--ui-accent) 10%,var(--ui-bg-secondary)),var(--ui-bg-secondary))}
 .hc-q{font:inherit;font-size:15.5px;width:100%;resize:vertical;border:1px solid transparent;border-radius:9px;background:transparent;color:var(--ui-text-primary);padding:6px 2px;margin:4px 0 6px}
 .hc-qsmall{font-size:12.5px;color:var(--ui-text-tertiary);margin-top:6px}
+.hc-bg{margin-top:4px;font-size:12px;color:var(--hc-mut)}
+.hc-bg summary{cursor:pointer;width:max-content}
+.hc-bg>div{margin-top:4px;padding:6px 10px;border-left:2px solid var(--hc-line);white-space:pre-wrap;color:var(--hc-fg2)}
 .hc-dlgfoot{position:sticky;bottom:-18px;margin:12px -20px -18px;padding:10px 20px 14px;background:var(--hc-solid);border-top:1px solid var(--ui-border,rgba(127,127,127,.25))}
 .hc-runtitle{font-size:13px;font-weight:600;color:var(--ui-text-secondary,inherit);margin-top:6px}
 .hc-av{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;font-weight:800;font-size:12.5px;color:#fff;flex:none}
@@ -2215,6 +2495,126 @@ const CSS = `
 .hc-gnum{width:26px;height:26px;border-radius:50%;flex:none;display:grid;place-items:center;font-weight:800;background:var(--hc-acc);color:var(--hc-on-acc)}
 .hc-guide{margin-bottom:14px}
 @media (max-width:980px){.hc-grid2,.hc-gsteps{grid-template-columns:1fr}}
+/* the table (chamber glow) */
+.hc-stagewrap2{display:flex;flex-direction:column;gap:0}
+.hc-evbox2{position:relative;border:1px solid var(--hc-line);background:var(--hc-panel2);border-radius:14px;padding:10px 14px 12px;display:flex;flex-direction:column;gap:8px;transition:border-color .3s,box-shadow .3s;z-index:1}
+.hc-evbox2.hc-sending{border-color:var(--hc-web);box-shadow:0 0 22px -6px color-mix(in srgb,var(--hc-web) 60%,transparent)}
+.hc-evhead{display:flex;align-items:baseline;gap:10px;font-size:12.5px;color:var(--hc-mut)}
+.hc-evhead b{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--hc-fg2);font-weight:650}
+.hc-evcount{margin-left:auto;color:var(--hc-fg2)}
+.hc-evrow{display:flex;flex-wrap:wrap;gap:7px;min-height:28px;align-items:center}
+.hc-evnote{font-size:13px;color:var(--hc-mut)}
+.hc-evsearch .hc-evnote{animation:hc-pulse 1.6s ease-in-out infinite}
+.hc-ep{display:inline-flex;align-items:center;gap:7px;padding:4px 11px 4px 9px;border-radius:99px;border:1px solid color-mix(in srgb,var(--hc-ans) 60%,transparent);background:var(--hc-panel);font-size:13px;color:var(--hc-fg);max-width:260px;animation:hc-epin .45s ease both;cursor:default}
+.hc-ep b{font:700 12px var(--hc-mono);color:var(--hc-ans)}
+.hc-ep span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hc-ep::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--hc-ans);flex:none}
+.hc-ep-web{border-color:color-mix(in srgb,var(--hc-web) 65%,transparent)}.hc-ep-web b{color:var(--hc-web)}.hc-ep-web::before{background:var(--hc-web)}
+.hc-ep-more{border-style:dashed;color:var(--hc-mut)}.hc-ep-more::before{display:none}
+@keyframes hc-epin{from{opacity:0;transform:translateY(8px) scale(.92)}}
+.hc-evout{position:absolute;left:50%;bottom:-6px;width:11px;height:11px;margin-left:-5.5px;border-radius:50%;background:var(--hc-panel2);border:1.5px solid var(--hc-line2);transition:background .3s,border-color .3s,box-shadow .3s}
+.hc-evbox2.hc-sending .hc-evout{background:var(--hc-web);border-color:var(--hc-web);box-shadow:0 0 10px var(--hc-web)}
+.hc-table text{paint-order:stroke}
+.hc-guide{fill:none;stroke:var(--hc-line2);stroke-dasharray:2 7}
+.hc-feed{fill:none;stroke:var(--hc-line2);stroke-width:1.5;stroke-dasharray:2 5;opacity:.75;transition:stroke .3s,opacity .3s}
+.hc-feed-chair{opacity:.45}
+.hc-outlet{fill:var(--hc-panel2);stroke:var(--hc-line2);stroke-width:1.5;opacity:0}
+.hc-feeds.hc-sending .hc-feed{stroke:var(--hc-web);opacity:.9}
+.hc-tspoke{fill:none;stroke:var(--hc-line2);stroke-width:1.6;opacity:.75}
+.hc-tenergy{fill:none;stroke:var(--hc-ans);stroke-width:2.4;stroke-linecap:round;stroke-dasharray:3 14;animation:hc-energy 1s linear infinite}
+.hc-tenergy.hc-e-vote{stroke:var(--hc-vote)}.hc-tenergy.hc-e-deb{stroke:var(--hc-deb)}
+@keyframes hc-energy{to{stroke-dashoffset:-34}}
+.hc-debarc{fill:none;stroke:var(--hc-deb);stroke-opacity:.45;stroke-width:1.6;stroke-dasharray:4 6}
+.hc-tseat{--sc:var(--hc-line2)}
+.hc-tseat.hc-answered{--sc:var(--hc-acc)}.hc-tseat.hc-thinking{--sc:var(--hc-ans)}.hc-tseat.hc-voting{--sc:var(--hc-vote)}.hc-tseat.hc-debating{--sc:var(--hc-deb)}
+.hc-tseat.hc-agree{--sc:var(--hc-ok)}.hc-tseat.hc-dissent{--sc:var(--hc-warn)}.hc-tseat.hc-failed{--sc:var(--hc-bad)}.hc-tseat.hc-waiting,.hc-tseat.hc-idle{--sc:var(--hc-mut)}
+.hc-tseat.hc-masked.hc-answered{--sc:var(--hc-vote)}
+.hc-podg{transition:transform .35s ease}
+.hc-tseat.hc-active .hc-podg{transform:scale(1.07)}
+.hc-thalo{fill:var(--sc);opacity:0;transition:opacity .4s}
+.hc-tseat.hc-active .hc-thalo{animation:hc-halo 1.3s ease-in-out infinite}
+.hc-tseat.hc-agree .hc-thalo,.hc-tseat.hc-dissent .hc-thalo{opacity:.25}
+@keyframes hc-halo{0%,100%{opacity:.16}50%{opacity:.36}}
+.hc-ttrack{fill:none;stroke:var(--hc-line);stroke-width:3.2}
+.hc-tarc{fill:none;stroke:var(--sc);stroke-width:3.6;stroke-linecap:round;transform:rotate(-90deg);transition:stroke-dashoffset .5s linear,stroke .4s}
+.hc-tcomet{fill:none;stroke:var(--hc-fg);stroke-opacity:.85;stroke-width:3.6;stroke-linecap:round;animation:hc-spin2 1.6s linear infinite}
+.hc-tdisc{fill:var(--hc-panel2);stroke:var(--sc);stroke-width:1.6;transition:stroke .4s}
+.hc-tseat .hc-ini{font-size:19px;font-weight:700}
+.hc-tseat .hc-let{font-size:26px}
+.hc-tseat .hc-lbl{font-size:18px;font-weight:600;stroke:var(--hc-bg);stroke-width:5px;stroke-linejoin:round}
+.hc-tseat .hc-sub{font-size:13.5px;stroke:var(--hc-bg);stroke-width:5px;stroke-linejoin:round}
+.hc-tseat .hc-stance{font-size:14.5px;font-weight:550;stroke:var(--hc-bg);stroke-width:5px;stroke-linejoin:round;fill:var(--hc-fg2)}
+.hc-tseat.hc-agree .hc-stance{fill:var(--hc-ok)}.hc-tseat.hc-dissent .hc-stance{fill:var(--hc-warn)}.hc-tseat.hc-failed .hc-stance{fill:var(--hc-bad)}.hc-tseat.hc-waiting .hc-stance,.hc-tseat.hc-idle .hc-stance{fill:var(--hc-mut)}
+.hc-tseat .hc-tk{font-size:13px;fill:var(--hc-mut);stroke:var(--hc-bg);stroke-width:5px;stroke-linejoin:round}
+.hc-tseat.hc-waiting,.hc-tseat.hc-idle{opacity:.8}
+.hc-bhalo{fill:var(--hc-acc);opacity:0;transition:opacity .4s}
+.hc-bench.hc-bwrite .hc-bhalo,.hc-bench.hc-bresearch .hc-bhalo{animation:hc-halo 1.5s ease-in-out infinite}
+.hc-bench.hc-bresearch .hc-bhalo{fill:var(--hc-web)}
+.hc-bench.hc-bdone .hc-bhalo{opacity:.22;fill:var(--hc-ok)}
+.hc-bdisc{fill:var(--hc-panel2);stroke:color-mix(in srgb,var(--hc-acc) 65%,transparent);stroke-width:1.6}
+.hc-bench.hc-bresearch .hc-bdisc{stroke:var(--hc-web)}.hc-bench.hc-bdone .hc-bdisc{stroke:var(--hc-ok)}
+.hc-bfill{fill:var(--hc-acc);opacity:.16;transition:width .6s linear}
+.hc-bench.hc-bdone .hc-bfill{fill:var(--hc-ok)}
+.hc-bscan{fill:var(--hc-web);opacity:.45;filter:blur(3px);animation:hc-scan 1.8s ease-in-out infinite alternate}
+@keyframes hc-scan{to{transform:translateX(266px)}}
+.hc-btitle{font-size:16px;font-weight:650;letter-spacing:.16em;fill:var(--hc-fg);text-anchor:middle}
+.hc-bsub{font:13px var(--hc-mono);fill:var(--hc-mut);text-anchor:middle}
+.hc-bstat{font-size:14px;fill:var(--hc-fg2);text-anchor:middle;stroke:var(--hc-bg);stroke-width:5px;stroke-linejoin:round}
+.hc-bverdict{font:italic 17px var(--hc-serif);fill:var(--hc-fg);text-anchor:middle;stroke:var(--hc-bg);stroke-width:5px;stroke-linejoin:round;animation:hc-fade .8s ease both}
+.hc-tripple{fill:none;stroke:var(--hc-acc);stroke-width:1.6;opacity:0;transform-box:fill-box;transform-origin:center;animation:hc-tripple 1.8s ease-out forwards}
+@keyframes hc-tripple{from{transform:scale(1);opacity:.9}to{transform:scale(2.6,3.4);opacity:0}}
+.hc-bubble rect{fill:var(--hc-panel);stroke:color-mix(in srgb,var(--hc-ans) 60%,transparent)}
+.hc-bubble text{font-size:14px;fill:var(--hc-fg)}
+.hc-bubble{animation:hc-bub 3.8s ease both}
+@keyframes hc-bub{0%{opacity:0;transform:translateY(6px)}10%,85%{opacity:1;transform:none}100%{opacity:0}}
+.hc-fx-ev{fill:var(--hc-web);filter:drop-shadow(0 0 4px color-mix(in srgb,var(--hc-web) 80%,transparent))}
+.hc-fx-ev2{fill:var(--hc-ans)}
+.hc-fx-web{fill:var(--hc-web);filter:drop-shadow(0 0 6px var(--hc-web))}
+.hc-fx-ans{fill:var(--hc-ans);filter:drop-shadow(0 0 5px var(--hc-ans))}
+.hc-fx-ok{fill:var(--hc-ok);filter:drop-shadow(0 0 6px var(--hc-ok))}.hc-fx-warn{fill:var(--hc-warn);filter:drop-shadow(0 0 6px var(--hc-warn))}
+.hc-root[data-scheme=light] :is(.hc-fx-ev,.hc-fx-web,.hc-fx-ans,.hc-fx-ok,.hc-fx-warn){filter:none}
+.hc-root[data-scheme=light] .hc-thalo,.hc-root[data-scheme=light] .hc-bhalo{filter:none}
+.hc-root[data-scheme=light] .hc-tseat.hc-active .hc-thalo{animation:none;opacity:.12}
+.hc-node.hc-waiting{opacity:.8}
+
+/* buttons: one outlined-glow system. main · secondary · tinted · quiet · danger · chips */
+.hc-root{--hc-fg2:color-mix(in srgb,var(--hc-fg) 82%,var(--hc-mut))}
+.hc-convene,.hc-btn2,.hc-stop,.hc-link,.hc-b{position:relative;overflow:hidden;display:inline-flex;align-items:center;justify-content:center;gap:8px;border-radius:12px;font-weight:550;cursor:pointer;white-space:nowrap;outline:none;transition:border-color .2s,box-shadow .2s,background .2s,color .2s,transform .08s}
+:is(.hc-convene,.hc-btn2,.hc-stop,.hc-link,.hc-b,.hc-chip,.hc-pbtn,.hc-step2,.hc-tab2):focus-visible{outline:none;box-shadow:0 0 0 2px var(--hc-bg),0 0 0 4px color-mix(in srgb,var(--hc-acc) 70%,transparent)!important}
+:is(.hc-convene,.hc-btn2,.hc-stop,.hc-link,.hc-b,.hc-chip):active:not(:disabled){transform:translateY(1px)}
+.hc-convene{padding:11px 22px;border:1px solid color-mix(in srgb,var(--hc-acc) 80%,transparent);color:var(--hc-fg)!important;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--hc-acc) 32%,transparent),color-mix(in srgb,var(--hc-acc) 15%,transparent));
+  box-shadow:0 0 0 1px color-mix(in srgb,var(--hc-acc) 25%,transparent),0 0 24px -6px color-mix(in srgb,var(--hc-acc) 70%,transparent)}
+.hc-convene::after{content:"";position:absolute;inset:0;background:linear-gradient(105deg,transparent 35%,rgba(255,255,255,.2) 50%,transparent 65%);transform:translateX(-120%);transition:transform .6s;pointer-events:none}
+.hc-convene:hover:not(:disabled){transform:none;box-shadow:0 0 0 1px color-mix(in srgb,var(--hc-acc) 45%,transparent),0 0 34px -4px color-mix(in srgb,var(--hc-acc) 85%,transparent)}
+.hc-convene:hover:not(:disabled)::after{transform:translateX(120%)}
+.hc-bic{font-size:9px;width:20px;height:20px;border-radius:50%;display:grid;place-items:center;border:1px solid currentColor;padding-left:2px}
+.hc-convene:hover:not(:disabled) .hc-bic{animation:hc-bpulse 1s ease infinite}
+@keyframes hc-bpulse{50%{box-shadow:0 0 0 4px color-mix(in srgb,var(--hc-acc) 30%,transparent)}}
+.hc-root[data-scheme=light] .hc-convene{box-shadow:0 0 0 1px color-mix(in srgb,var(--hc-acc) 20%,transparent),0 6px 18px -8px color-mix(in srgb,var(--hc-acc) 60%,transparent)}
+.hc-btn2,.hc-b-secondary{padding:7px 13px;background:transparent;border:1px solid var(--hc-line2);color:var(--hc-fg)!important}
+:is(.hc-btn2,.hc-b-secondary):hover:not(:disabled){border-color:color-mix(in srgb,var(--hc-acc) 70%,transparent);box-shadow:0 0 14px -6px var(--hc-acc)}
+.hc-b-sm,.hc-btn-sm{padding:5px 11px;font-size:12px;border-radius:10px}
+.hc-link,.hc-b-quiet{padding:5px 9px;border-radius:10px;background:transparent;border:1px solid transparent;color:var(--hc-fg2)!important;font-size:12.5px}
+:is(.hc-link,.hc-b-quiet):hover:not(:disabled){color:var(--hc-fg)!important;border-color:var(--hc-line);text-decoration:none}
+.hc-link.hc-tint{border-color:color-mix(in srgb,var(--hc-acc) 45%,transparent);color:color-mix(in srgb,var(--hc-acc) 80%,var(--hc-fg))!important}
+.hc-link.hc-tint:hover:not(:disabled){background:color-mix(in srgb,var(--hc-acc) 12%,transparent);border-color:color-mix(in srgb,var(--hc-acc) 65%,transparent)}
+.hc-stop,.hc-b-danger,.hc-btn2.hc-danger{padding:7px 13px;background:transparent;border:1px solid color-mix(in srgb,var(--hc-bad) 55%,transparent);color:var(--hc-bad)!important}
+.hc-link.hc-bad{color:var(--hc-bad)!important}
+:is(.hc-stop,.hc-b-danger,.hc-btn2.hc-danger,.hc-link.hc-bad):hover:not(:disabled){border-color:color-mix(in srgb,var(--hc-bad) 60%,transparent);background:color-mix(in srgb,var(--hc-bad) 10%,transparent);box-shadow:0 0 18px -6px var(--hc-bad)}
+:is(.hc-convene,.hc-btn2,.hc-stop,.hc-b):disabled:not(.hc-busy){opacity:1;cursor:not-allowed;background:color-mix(in srgb,var(--hc-fg) 6%,var(--hc-panel))!important;color:var(--hc-mut)!important;border-color:var(--hc-line)!important;box-shadow:none!important}
+.hc-link:disabled{opacity:1;color:var(--hc-mut)!important;cursor:not-allowed}
+.hc-convene.hc-busy{cursor:progress;opacity:1}
+.hc-bspin{width:13px;height:13px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:hc-bspin .7s linear infinite}
+@keyframes hc-bspin{to{transform:rotate(360deg)}}
+.hc-chip{border-color:var(--hc-line);color:var(--hc-mut)!important;transition:border-color .2s,box-shadow .2s,color .2s}
+.hc-chip:hover:not(.hc-static){color:var(--hc-fg)!important;border-color:var(--hc-line2)}
+.hc-chip.hc-on{color:var(--hc-fg)!important;border-color:var(--hc-acc);background:color-mix(in srgb,var(--hc-acc) 10%,transparent);box-shadow:0 0 12px -5px var(--hc-acc),inset 0 0 0 1px color-mix(in srgb,var(--hc-acc) 40%,transparent)}
+.hc-chip.hc-static{color:var(--hc-fg2)!important}
+.hc-pbtn{transition:border-color .2s,box-shadow .2s}.hc-pbtn:hover{border-color:color-mix(in srgb,var(--hc-acc) 70%,transparent);box-shadow:0 0 14px -6px var(--hc-acc)}
+.hc-step2.hc-on{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--hc-acc) 35%,transparent)}
+@media (prefers-reduced-motion: reduce){.hc-convene::after,.hc-epill{animation:none!important;transition:none!important}.hc-convene:hover .hc-bic{animation:none}}
+
 `
 
 export default {

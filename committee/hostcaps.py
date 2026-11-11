@@ -182,6 +182,13 @@ _TOO_LONG = re.compile(r"context(?:[_ ]length| window)|maximum context|too many 
                        re.IGNORECASE)
 
 
+_THINKING_REJECT = re.compile(r"reasoning|thinking|effort|budget_tokens", re.IGNORECASE)
+
+
+def looks_like_thinking_rejection(err: Any) -> bool:
+    return bool(_THINKING_REJECT.search(str(err or ""))) and not looks_too_long(err)
+
+
 def looks_too_long(err: Any) -> bool:
     return bool(_TOO_LONG.search(str(err or "")))
 
@@ -207,6 +214,19 @@ def learn(provider: str, model: str, **facts: Any) -> None:
 
 
 # ── what callers read ───────────────────────────────────────────────────────
+
+def refuses_thinking(provider: str, model: str) -> bool:
+    """True once this model rejected a reasoning level (cheap: no price lookup, read on every call)."""
+    if not (provider and model):
+        ap, am = active_route()
+        provider, model = provider or ap, model or am
+    if not model:
+        return False
+    try:
+        return ((_load().get("models") or {}).get(key(provider, model)) or {}).get("thinking") is False
+    except Exception:  # noqa: BLE001 - notes are optional
+        return False
+
 
 def model_caps(provider: str, model: str) -> dict[str, Any]:
     if not (provider and model):
@@ -237,6 +257,7 @@ def model_caps(provider: str, model: str) -> dict[str, Any]:
             if hub:
                 pin, pout, via = hub.get("in"), hub.get("out"), hub.get("via")
     return {"vision": False if m.get("vision") is False else None,
+            "thinking": False if m.get("thinking") is False else None,
             "context_fail": m.get("context_fail"),
             "price_in": pin, "price_out": pout, "price_via": via,
             "billing": bill, "billing_chosen": bool(chosen), "billing_detected": bool(detected) and not chosen}

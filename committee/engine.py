@@ -19,7 +19,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Protocol
 
-from . import hostcaps, pricing, prompts
+from . import hostcaps, pricing, prompts, research
 from .config import model_label
 
 STAGES = ("stage1", "review", "deliberate", "chair")
@@ -39,10 +39,33 @@ class Reply:
 class LLM(Protocol):
     def structured(self, *, provider: str, model: str, instructions: str, text: str,
                    schema: dict, schema_name: str, max_tokens: int, timeout: float, purpose: str,
-                   images: list[dict[str, Any]] = ...) -> Reply: ...
+                   images: list[dict[str, Any]] = ..., thinking: str = ...) -> Reply: ...
 
     def text(self, *, provider: str, model: str, instructions: str, text: str,
-             max_tokens: int, timeout: float, purpose: str) -> Reply: ...
+             max_tokens: int, timeout: float, purpose: str, thinking: str = ...) -> Reply: ...
+
+
+# Thinking per step. The seats' answers and the verdict are where reasoning pays; the rest is clerical
+# (write searches, pick passages, describe a photo, rank answers already read, list the disputes, reply
+# on one point). Measured: a reasoning-heavy model listed the same disputes in 57 s on low, 229 s on its default.
+THINK_ANSWER = "medium"
+THINK_VERDICT = "medium"
+THINK_CLERICAL = "low"
+
+
+def thinking_for(stage: str, slot: dict[str, Any]) -> str:
+    """The level for one call: the seat's or chairman's own choice on the steps it controls (the answer,
+    the verdict), the clerical level everywhere else. A model that rejected the setting before gets
+    'default' (nothing sent)."""
+    if stage == "stage1":
+        level = slot.get("thinking") or THINK_ANSWER
+    elif stage == "chair":
+        level = slot.get("thinking") or THINK_VERDICT
+    else:
+        level = THINK_CLERICAL
+    if level != "default" and hostcaps.refuses_thinking(slot.get("provider") or "", slot.get("model") or ""):
+        return "default"
+    return level
 
 
 class Cancelled(Exception):
@@ -86,6 +109,9 @@ def new_run(roster: dict[str, Any], *, question: str, brief: str = "", evidence:
         **{k: roster[k] for k in ("preset", "template", "template_title", "chairman_guidance", "decision_focus",
                                   "chairman", "review", "quorum", "stage_timeout", "max_tokens", "warnings")},
         "deliberate": roster.get("deliberate") or "never",
+        "research": bool(roster.get("research")),
+        "research_secs": research.cap_of(roster.get("research_secs")),
+        "web": None,
         "deliberate_rounds": 2 if roster.get("deliberate_rounds") == 2 else 1,
         "deliberation": None,
         "limits": {"max_secs": None, "chair_reserve": CHAIR_RESERVE_DEFAULT, "review_reserve": REVIEW_RESERVE_DEFAULT,
@@ -317,7 +343,8 @@ def _parallel(jobs: dict[str, Callable[[], Any]], *, timeout: float, cancel: thr
         pool.shutdown(wait=False, cancel_futures=True)
 
 
-def _record_usage(run: dict[str, Any], stage: str, who: str, slot: dict[str, Any], reply: Reply, secs: float):
+def _record_usage(run: dict[str, Any], stage: str, who: str, slot: dict[str, Any], reply: Reply, secs: float,
+                  thinking: str = "default"):
     u = reply.usage or {}
     charged, lst, known = pricing.cost(slot, u.get("input_tokens"), u.get("output_tokens"))
     if known and isinstance(u.get("cost_usd"), (int, float)) and (slot.get("price") or {}).get("billing") == "paid":
@@ -327,7 +354,7 @@ def _record_usage(run: dict[str, Any], stage: str, who: str, slot: dict[str, Any
                              "model": reply.model or slot.get("model") or "",
                              "input_tokens": u.get("input_tokens"), "output_tokens": u.get("output_tokens"),
                              "cost_usd": u.get("cost_usd"), "cost_est": round(charged, 6), "cost_list": round(lst, 6),
-                             "cost_known": known, "secs": round(secs, 1)})
+                             "cost_known": known, "secs": round(secs, 1), "thinking": thinking})
 
 
 _USAGE_LOCK = threading.Lock()
@@ -387,11 +414,19 @@ def _call_structured(llm: LLM, run, stage, who, slot, instructions, text, schema
               max_tokens=int(max_tokens or run.get("budget_tokens") or run["max_tokens"]),
               timeout=float(run["stage_timeout"]), purpose=f"hermes-committee.{stage}")
     extra = {"images": images} if images else {}
-    for attempt in range(2):
+    think = thinking_for(stage, slot)
+    retried_json = False
+    for _attempt in range(4):
         t0 = time.monotonic()
         try:
-            r = llm.structured(instructions=instructions, text=text, schema=schema, schema_name=name, **kw, **extra)
+            r = _import_safe(lambda: llm.structured(instructions=instructions, text=text, schema=schema, schema_name=name,
+                                                    thinking=think, **kw, **extra))
         except Exception as exc:  # noqa: BLE001
+            if think != "default" and hostcaps.looks_like_thinking_rejection(exc):
+                # This provider refuses a reasoning level: remember it, and call it the way it was before.
+                hostcaps.learn(slot.get("provider") or "", slot.get("model") or "", thinking=False)
+                think = "default"
+                continue
             if hostcaps.looks_too_long(exc):
                 hostcaps.learn(slot.get("provider") or "", slot.get("model") or "",
                                context_fail=pricing.tok(instructions) + pricing.tok(text)
@@ -405,15 +440,30 @@ def _call_structured(llm: LLM, run, stage, who, slot, instructions, text, schema
                 text, extra, images = fallback_text, {}, None
                 continue
             raise
-        _record_usage(run, stage, who, slot, r, time.monotonic() - t0)
+        _record_usage(run, stage, who, slot, r, time.monotonic() - t0, think)
         if r.content_type == "json" and isinstance(r.parsed, dict):
             return r.parsed, r.text or "", False
-        if attempt == 0:
-            instructions = instructions + " Respond with JSON that matches the schema exactly."
+        if retried_json:
+            break
+        retried_json = True
+        instructions = instructions + " Respond with JSON that matches the schema exactly."
     t0 = time.monotonic()
-    r = llm.text(instructions=instructions, text=fallback_text if images and fallback_text else text, **kw)
-    _record_usage(run, stage, who, slot, r, time.monotonic() - t0)
+    r = _import_safe(lambda: llm.text(instructions=instructions, text=fallback_text if images and fallback_text else text,
+                                      thinking=think, **kw))
+    _record_usage(run, stage, who, slot, r, time.monotonic() - t0, think)
     return None, r.text or "", True
+
+
+def _import_safe(fn, tries: int = 3):
+    """Run a model call; if two seats' first calls import the same provider library at the same moment,
+    Python can raise an import deadlock in one thread. That is not the model failing: wait and retry."""
+    for k in range(tries):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            if k == tries - 1 or "deadlock" not in f"{type(exc).__name__} {exc}".lower():
+                raise
+            time.sleep(0.4 + 0.6 * k)
 
 
 # ── pictures: who sees them, and descriptions for everyone else ─────────────
@@ -439,6 +489,126 @@ def _description_text(parsed: Optional[dict], raw: str) -> str:
     if str(parsed.get("unclear") or "").strip():
         out += f"\nUnclear: {parsed['unclear'].strip()}"
     return out.strip()
+
+
+def _web_skip(run: dict[str, Any], note: str) -> None:
+    run["web"] = {"status": "skipped", "queries": [], "items": [], "note": note}
+    run["timeline"].append({"t": _now(), "event": "research", "ok": False, "items": 0})
+
+
+def run_research(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress: Progress) -> None:
+    """Research first (committee/research.py), before Stage 1. Counts against the time limit and the
+    budget like any stage; on a page run the user can untick sources before the seats start."""
+    lim = run.get("limits") or {}
+    if lim.get("max_secs") and not run.get("deadline"):
+        run["deadline"] = _now() + lim["max_secs"]
+    answer_need = float(lim.get("answer_reserve") or research.ANSWER_RESERVE_S)
+    window = stage_window(run, "stage1", reserve_review=False)
+    if run.get("deadline"):
+        window -= answer_need
+    cap = research.cap_of(run.get("research_secs"))
+    window = min(research.WINDOW_MAX_S, cap, window)
+    if window < research.MIN_WINDOW_S:
+        _web_skip(run, f"Skipped: not enough time in the {_limit_minutes(run)} limit for the web research (it needs "
+                       "about a minute) and the answers. Raise the time limit to use Research first.")
+        return
+    if not _fit_usd(run, cancel, progress, lambda: pricing.research_calls(run), "The web research"):
+        _web_skip(run, "Skipped: the web research does not fit the budget.")
+        return
+    run["live"] = {"stage": "stage1", "started": _now(), "done": {}, "ends": _now() + window,
+                   "researching": "starting"}
+    progress("Research · searching the web before the seats answer")
+    stop = threading.Event()
+
+    def step(s: str) -> None:
+        run["live"]["researching"] = s
+        progress(f"Research · {s}")
+
+    def call(stage, who, slot, instr, text, schema, name, max_tokens=None):
+        return _call_structured(llm, run, stage, who, slot, instr, text, schema, name, max_tokens=max_tokens)
+
+    box = research.new_box()
+    box["read_by"] = _now() + max(window * 0.5, window - research.PICK_RESERVE_S)   # leave time to pick passages
+    try:
+        res = _parallel({"research": lambda: research.gather(run, llm, call, run["chairman"], step, stop, box)},
+                        timeout=window, cancel=cancel, on_done=lambda *_: None, why="time limit")
+        ok, val = res.get("research", (False, "not run"))
+        if not ok and box.get("phase") == "picking":
+            # Only the last call is still out: wait a little for it rather than throw the search away,
+            # as long as the answers keep their time.
+            t0 = _now()
+            while not box.get("done") and _now() - t0 < research.grace_for(cap):
+                if cancel.is_set():
+                    raise Cancelled()
+                if run.get("deadline") and run["deadline"] - _now() - float(lim.get("chair_reserve") or CHAIR_RESERVE_DEFAULT) < answer_need:
+                    break
+                time.sleep(_POLL_S)
+            ok = bool(box.get("done"))
+    finally:
+        stop.set()
+    if ok:
+        web = box
+    else:
+        share = f"its {int(window)} s share of the {_limit_minutes(run)} limit" if run.get("deadline") else f"{int(window)} s"
+        web = {**{k: box.get(k) for k in ("queries", "searched", "read", "accessed")}, "status": "failed", "items": [],
+               "note": f"The web research did not finish in {share} (it was {box.get('phase') or 'starting'}). "
+                       + ("Raise the time limit to give it more time." if run.get("deadline") else f"({val})")}
+    web.pop("phase", None)
+    web.pop("done", None)
+    run["web"] = web
+    if web.get("items") and interactive(run, cancel):
+        _review_sources(run, cancel, progress)
+    research.renumber(web)
+    run["timeline"].append({"t": _now(), "event": "research", "ok": bool(web["items"]), "items": len(web["items"]),
+                            "searched": web.get("searched", 0), "dropped": web.get("dropped", 0)})
+
+
+def _sources_answer(run: dict[str, Any], cancel: Any) -> Optional[list[str]]:
+    """The page's answer to the source review: the ids to keep, or None while there is none."""
+    reader = getattr(cancel, "requests", None)
+    try:
+        reqs = reader() if callable(reader) else []
+    except Exception:  # noqa: BLE001
+        return None
+    seen = run.setdefault("requests_applied", [])
+    for r in reqs or []:
+        rid = str(r.get("id") or "")
+        if r.get("kind") == "sources" and rid and rid not in seen:
+            seen.append(rid)
+            return [str(x) for x in r.get("keep") or []]
+    return None
+
+
+def _review_sources(run: dict[str, Any], cancel: Any, progress: Progress) -> None:
+    """Pause up to research.REVIEW_WAIT_S for the user to untick sources. Paused time does not count."""
+    web = run["web"]
+    t0 = _now()
+    before = dict(run.get("live") or {})
+    run["live"] = {**before, "researching": "", "sources": {"since": t0, "until": t0 + research.REVIEW_WAIT_S}}
+    run["timeline"].append({"t": t0, "event": "sources_ask", "items": len(web["items"])})
+    progress(f"Paused · review the {len(web['items'])} web sources on the Committee page, "
+             f"or it continues with all of them in {research.REVIEW_WAIT_S} s")
+    keep = None
+    try:
+        while True:
+            if cancel.is_set():
+                raise Cancelled()
+            keep = _sources_answer(run, cancel)
+            if keep is not None or _now() - t0 >= research.REVIEW_WAIT_S:
+                break
+            time.sleep(_POLL_S)
+    finally:
+        waited = _now() - t0
+        lim = run.setdefault("limits", {})
+        lim["paused"] = round(float(lim.get("paused") or 0) + waited, 1)
+        if run.get("deadline"):
+            run["deadline"] += waited
+        run["live"] = before
+    if keep is not None:
+        for x in web["items"]:
+            x["keep"] = x["id"] in keep
+        web["reviewed"] = True
+    progress("Sources reviewed · the seats start" if keep is not None else "No changes · the seats start with every source")
 
 
 def run_describe(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress: Progress) -> None:
@@ -560,6 +730,8 @@ def run_stage1(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress:
         run.setdefault("skipped", {})["run"] = "budget"
         run["timeline"].append({"t": _now(), "event": "budget_refused"})
         return
+    if research.wanted(run):
+        run_research(run, llm, cancel, progress)
     pictures = picture_inputs(run)
     if pictures and _undescribed(run):
         run_describe(run, llm, cancel, progress)
@@ -763,6 +935,19 @@ def _norm_actions(parsed: dict) -> dict[str, Any]:
     return {"action_items": items, "next_actions": [action_text(a) for a in items]}
 
 
+def norm_role_fit(items: list, seats: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The chairman's role-fit note matched to seats: one entry per seat that has instructions, at most."""
+    from .followup import seat_of
+    roled = {s["label"]: s for s in seats if (s.get("instructions") or "").strip()}
+    out: dict[str, dict[str, Any]] = {}
+    for x in items:
+        lab = seat_of(x.get("seat"), seats)
+        fit = str(x.get("fit") or "").lower()
+        if lab in roled and lab not in out and fit in ("kept", "drifted"):
+            out[lab] = {"label": lab, "seat": roled[lab]["name"], "fit": fit, "note": _clip(str(x.get("note") or "").strip(), 240)}
+    return [out[s["label"]] for s in seats if s["label"] in out]
+
+
 def _norm_chair(parsed: Optional[dict], raw: str) -> dict[str, Any]:
     if parsed is None:
         first = next((ln.strip("#* ").strip() for ln in raw.splitlines() if ln.strip()), "")
@@ -778,6 +963,7 @@ def _norm_chair(parsed: Optional[dict], raw: str) -> dict[str, Any]:
             "confidence_note": str(parsed.get("confidence_note") or "").strip(),
             "reverse_if": _as_list(parsed.get("reverse_if")), "agreement": _as_list(parsed.get("agreement")),
             "dissent": dissent, "open_questions": _as_list(parsed.get("open_questions")),
+            "role_fit": [x for x in parsed.get("role_fit") or [] if isinstance(x, dict)],
             **_norm_actions(parsed),
             "change_from_earlier": str(parsed.get("change_from_earlier") or "").strip(),
             "executive_summary": _norm_exec(parsed.get("executive_summary")),
@@ -791,6 +977,7 @@ def run_chair(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress: 
     rank_pos = {r["label"]: i for i, r in enumerate(run["ranking"])}
     answers = sorted(
         [{"label": lab, "name": seat_by_label(run, lab)["name"], **a,
+          "role": seat_by_label(run, lab).get("instructions") or "",
           "answer": scrub_identity(run, a["answer"], names_too=False)}
          for lab, a in run["answers"].items() if a["status"] == "ok"],
         key=lambda a: (rank_pos.get(a["label"], 99), a["label"]))
@@ -832,6 +1019,7 @@ def run_chair(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress: 
         parsed, raw, fb = _call_structured(llm, run, "chair", "Chairman", slot, instr, text,
                                            prompts.CHAIR_SCHEMA, "committee_verdict", max_tokens=chair_mt)
         out = _norm_chair(parsed, raw)
+        out["role_fit"] = norm_role_fit(out.get("role_fit") or [], run["seats"])
         disputes = (run.get("deliberation") or {}).get("disputes") or []
         if out.get("disputes_resolved") and disputes:
             hit = match_resolved(out["disputes_resolved"], disputes)

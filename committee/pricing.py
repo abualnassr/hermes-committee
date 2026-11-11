@@ -47,9 +47,20 @@ def _images(run: dict[str, Any]) -> int:
 
 
 def _base(run: dict[str, Any]) -> int:
+    from . import research
     files_text = (run.get("evidence_index") or {}).get("tokens", 0) - _images(run) * IMAGE_TOKENS
     return OVERHEAD + tok(run.get("question", "")) + tok(run.get("brief", "")) + tok(run.get("evidence", "")) \
-        + max(0, files_text)
+        + max(0, files_text) + research.tokens(run)
+
+
+def research_calls(run: dict[str, Any]) -> list[tuple[dict, int, int, int]]:
+    """The two chairman calls of Research first (queries, passages), while it has not run yet."""
+    from . import research
+    if not research.wanted(run):
+        return []
+    q = tok(run.get("question", ""))
+    return [(run["chairman"], research.EST_QUERY_IN + q, 150, research.QUERIES_MAX_TOKENS),
+            (run["chairman"], research.EST_EXCERPT_IN + q, 1200, research.EXCERPTS_MAX_TOKENS)]
 
 
 def _mt(run: dict[str, Any]) -> int:
@@ -124,9 +135,9 @@ def estimate(run: dict[str, Any]) -> dict[str, Any]:
     """Whole-run range before anything is sent: low = typical answer lengths, high = every call
     writes its maximum. ``list_*`` are the same at list price (subscription seats included)."""
     delib = deliberating(run)
-    calls = describe_calls(run) + stage1_calls(run) + (review_calls(run) if run.get("review") else []) \
+    calls = research_calls(run) + describe_calls(run) + stage1_calls(run) + (review_calls(run) if run.get("review") else []) \
         + ([agenda_call(run)] + round_calls(run) * rounds(run) if delib else []) + [chair_call(run)]
-    typical = describe_calls(run) + stage1_calls(run) \
+    typical = research_calls(run) + describe_calls(run) + stage1_calls(run) \
         + (review_calls(run, typical=True) if run.get("review") else []) \
         + ([agenda_call(run, typical=True)] if delib else []) + [chair_call(run, typical=True)]
     lo, hi = _sum(typical, high=False), _sum(calls, high=True)

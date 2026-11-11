@@ -20,9 +20,9 @@ STAGE1_SCHEMA = {
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "key_points": _STRS,
         "assumptions": _STRS,
-        "risks": _STRS,
+        "risks": {**_STRS, "description": "Risks within your role. Write 'outside my role' for areas you do not judge."},
         "would_change_mind": _STR,
-        "evidence_gaps": _STRS,
+        "evidence_gaps": {**_STRS, "description": "Evidence you would need for your role's judgement."},
     },
     "required": ["answer", "summary", "confidence", "key_points", "assumptions", "risks",
                  "would_change_mind", "evidence_gaps"],
@@ -61,6 +61,14 @@ CHAIR_SCHEMA = {
             "additionalProperties": False,
         }},
         "open_questions": _STRS,
+        "role_fit": {"type": "array", "description":
+                     "Only for members that were given a role (shown after 'role:' in their heading); empty "
+                     "otherwise. fit: 'kept' if the answer stayed within its role, 'drifted' if it mostly answered "
+                     "outside it or ignored its instructions. note: one short reason.",
+                     "items": {"type": "object",
+                               "properties": {"seat": _STR, "fit": {"type": "string", "enum": ["kept", "drifted"]},
+                                              "note": _STR},
+                               "required": ["seat", "fit", "note"], "additionalProperties": False}},
         "action_items": {"type": "array", "description":
                          "The next actions, most urgent first. owner: the role or team if the question or evidence "
                          "names one or it is clearly implied, else an empty string. when: the timing if stated or "
@@ -94,7 +102,7 @@ CHAIR_SCHEMA = {
                                         "additionalProperties": False}},
     },
     "required": ["final_answer", "decision", "confidence", "confidence_note", "reverse_if", "agreement",
-                 "dissent", "open_questions", "action_items", "change_from_earlier", "executive_summary",
+                 "dissent", "open_questions", "role_fit", "action_items", "change_from_earlier", "executive_summary",
                  "disputes_resolved"],
     "additionalProperties": False,
 }
@@ -161,15 +169,26 @@ def _context_block(run: dict[str, Any], see_images: bool = False) -> str:
         parts.append("# Evidence pack\nUse this evidence. Cite it when you rely on it. "
                      "Do not invent facts beyond it; say so when evidence is missing.\n\n" + run["evidence"].strip())
     parts += _files_block(run, see_images)
+    from .research import block as _web
+    if _web(run):
+        parts.append(_web(run))
     return "\n\n".join(parts)
+
+
+SCOPE_RULE = ("Stay within your role: answer from its point of view and on what it covers. If a point falls "
+              "outside your role, say so in one line instead of covering it; other members cover it.")
+
+
+def role_block(seat: dict[str, Any]) -> str:
+    """The seat's role, first and on its own, with the scope rule (only for seats that have instructions)."""
+    return f"# Your seat: {seat['name']}\n{seat.get('instructions', '').strip()}\n\n{SCOPE_RULE}\n\n"
 
 
 def stage1(run: dict[str, Any], seat: dict[str, Any], see_images: bool = False) -> tuple[str, str]:
     role = seat.get("instructions", "").strip()
-    lines = ["You are one member of a committee answering a question independently. "
-             "Other members answer the same question separately; you will not see their answers yet."]
-    if role:
-        lines.append(f"Your seat: {seat['name']}. {role}")
+    lines = [role_block(seat)] if role else []
+    lines.append("You are one member of a committee answering a question independently. "
+                 "Other members answer the same question separately; you will not see their answers yet.")
     lines.append("Give your own best answer. Be specific. State your confidence honestly (0 to 1). "
                  "List assumptions, risks, what would change your mind, and any evidence you would need. "
                  "Use empty lists or strings where a field does not apply.")
@@ -199,12 +218,15 @@ def chairman(run: dict[str, Any], answers: list[dict[str, Any]], critiques: dict
         "(record it under dissent with the member's name as the label) instead of averaging it away; in your text, refer to "
         "members by their name (shown in brackets after each response label), never by a bare letter; do not claim "
         "consensus that is not there; prefer the better-ranked reasoning but correct errors wherever you find "
-        "them. Confidence is high, medium or low."
+        "them. Weigh each member mainly within its role (shown after 'role:'), and say when an important "
+        "aspect was covered by no member. Confidence is high, medium or low."
         + (" This is a decision: the decision field must be one clear recommendation." if run.get("decision_focus")
            else " This is a question, not a decision: put the direct answer in one sentence in the decision field."))
     body = [_context_block(run), "# Member responses"]
     for a in answers:
-        body.append(f"## Response {a['label']} ({a['name']})\nStated confidence: {a.get('confidence')}\n\n"
+        role = " ".join(str(a.get("role") or "").split())
+        role = f" — role: {role[:300]}{'…' if len(role) > 300 else ''}" if role else ""
+        body.append(f"## Response {a['label']} ({a['name']}){role}\nStated confidence: {a.get('confidence')}\n\n"
                     f"{a['answer'].strip()}")
     if ranking:
         body.append("# Peer ranking (average position, lower is better)\n" + "\n".join(
@@ -307,8 +329,9 @@ def deliberation_round(run: dict[str, Any], seat: dict[str, Any], answers: list[
     """One member answers the agenda point by point, having read the others' answers (and earlier replies)."""
     role = seat.get("instructions", "").strip()
     instructions = (
-        f"You are {seat['name']}, a member of a committee. You answered independently; now the committee "
-        "deliberates on the points below, where members disagree. " + (f"Your seat: {role} " if role else "")
+        (role_block(seat) + "Argue from your role. " if role else "")
+        + f"You are {seat['name']}, a member of a committee. You answered independently; now the committee "
+        "deliberates on the points below, where members disagree. "
         + "For every point give your stance: hold (you keep your position), change (you now take another side) "
         "or partly (you concede part of it). Pick the side tag you now take from the listed tags. Argue from "
         "evidence and reasoning and cite evidence by number where you can. To change position you must name "

@@ -46,7 +46,7 @@ def delib_decided(chair: dict, disputes: Optional[list] = None) -> dict:
 
 
 _NEEDS_CITE = re.compile(r"\b(?:with|in|see|per|from|by|of|to|under|on|and|or)$", re.I)
-_CITES = re.compile(r"\s*\[(?:[EI]\d+(?:\s*[,;–-]\s*)?)+\]")
+_CITES = re.compile(r"\s*\[(?:[EIW]\d+(?:\s*[,;–-]\s*)?)+\]")
 
 
 def _clean(text: str) -> str:
@@ -347,6 +347,10 @@ def render(run: dict[str, Any]) -> str:
         out.append(f"| {_cell(s['name'])} | {_cell(model_label(s))} | {'yes' if a.get('status') == 'ok' else a.get('status', 'not run')} | "
                    f"{_conf(a.get('confidence'))} | {avg} |")
     out.append(f"Chairman: {model_label(run['chairman'])}")
+    drifted = [x for x in (run.get("chair") or {}).get("role_fit") or [] if x.get("fit") == "drifted"]
+    if drifted:
+        out.append("_Drifted from role (chairman's note):_ " + "; ".join(
+            f"{x['seat']}" + (f" ({x['note']})" if x.get("note") else "") for x in drifted))
     out.append(f"_Chairman's brief{' (custom)' if run.get('custom_brief') else ''}: {run.get('chairman_guidance') or '—'}"
                f"{' · Mode: decision' if run.get('decision_focus') else ' · Mode: answer'}_")
 
@@ -400,6 +404,10 @@ def render(run: dict[str, Any]) -> str:
         out.append(f"### {s['name']} ({model_label(s)})")
         if s.get("instructions"):
             out.append(f"_Instructions:_ {s['instructions']}")
+            rf = next((x for x in (run.get("chair") or {}).get("role_fit") or [] if x.get("label") == s["label"]), None)
+            if rf:
+                out.append(f"_Role (chairman's note):_ {'drifted' if rf['fit'] == 'drifted' else 'kept to it'}"
+                           + (f" · {rf['note']}" if rf.get("note") else ""))
         if a.get("status") != "ok":
             out.append(f"**Did not answer:** {a.get('error', 'not run')}")
             continue
@@ -437,7 +445,8 @@ def render(run: dict[str, Any]) -> str:
                    + "\n".join("| " + " | ".join(r) + " |" for r in rows))
     from .followup import own_brief
     brief = own_brief(run)
-    if brief or run.get("evidence") or run.get("files"):
+    web = run.get("web") or {}
+    if brief or run.get("evidence") or run.get("files") or web.get("items") or web.get("note"):
         out.append("## Appendix: brief and evidence")
         if brief:
             out.append("### Brief\n" + brief)
@@ -455,6 +464,13 @@ def render(run: dict[str, Any]) -> str:
                     f"**[{i['id']}] {i['source']}" + (f" · {i['locator']}" if i.get('locator') else "") + "**  \n"
                     + (i.get("description") or f"_Not described: {i.get('describe_error') or 'unknown'}_")
                     for i in imgs))
+    if web.get("items"):
+        out.append("### Web sources (Research first)\nFound by one web search before the seats answered; every seat "
+                   "got the same passages, cited as [W1], [W2]…. Unverified" + (f"; accessed {web['accessed']}" if web.get("accessed") else "")
+                   + (f"; searched: {'; '.join(web.get('queries') or [])}" if web.get("queries") else "") + ".\n\n"
+                   + "\n\n".join(f"**[{x['id']}] [{x['title']}]({x['url']})** · {x['site']}  \n> {x['excerpt']}" for x in web["items"]))
+    elif run.get("research") and web.get("note"):
+        out.append(f"### Web sources (Research first)\n_{web['note']}_")
     out.append("---\n_" + DISCLAIMER + "_")
     out.append("---\n_" + about(run) + "_")
     return "\n\n".join(out) + "\n"
