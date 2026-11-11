@@ -15,6 +15,10 @@ decision, its dissent, next actions and a PDF report.
 
 <sub>Screenshots use an invented example and invented model names.</sub>
 
+
+https://github.com/user-attachments/assets/bca7420f-78f4-498e-965e-dc9e25051898
+
+
 **▶ [Watch the 73-second demo on YouTube](https://www.youtube.com/watch?v=cg8Mme4T09I)**: a real committee run (used Tesla or new Corolla Hybrid?), replayed from the Desktop page. ([Download the MP4](https://github.com/abualnassr/hermes-committee/releases/download/v0.4.1/hermes-committee-1080p.mp4))
 
 ---
