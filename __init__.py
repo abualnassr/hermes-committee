@@ -365,13 +365,49 @@ def _set_reserves(roster: dict[str, Any]) -> None:
         logger.debug("hermes-committee: could not size time reserves", exc_info=True)
 
 
-def _read_paths(paths: list[Any]) -> list[dict[str, Any]]:
+_SECRET_NAMES = {"auth.json", "auth.lock", "webhook_subscriptions.json", "credentials", "credentials.json",
+                 ".netrc", ".pgpass", ".git-credentials", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
+_SECRET_DIRS = {"mcp-tokens", ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker"}
+
+
+def _hermes_roots() -> list[Path]:
+    """The active Hermes home (and the shared root above ``profiles/``), found from this plugin's
+    own data dir ``<home>/plugin-data/<id>/`` so no core module is imported."""
+    home = _data_dir().resolve().parent.parent
+    roots = [home]
+    if home.parent.name == "profiles":
+        roots.append(home.parent.parent)
+    return roots
+
+
+def _refuse_secret_path(p: Path) -> None:
+    """Fail closed on paths a model names: nothing inside a Hermes home except this plugin's data,
+    and no known credential file anywhere. Symlinks are resolved first."""
+    rp = p.resolve(strict=True)
+    name = rp.name.lower()
+    parts = {x.lower() for x in rp.parts[:-1]}
+    if (name in _SECRET_NAMES or name.startswith(".env") or ("oauth" in name and name.endswith(".json"))
+            or name.endswith((".pem", ".p12", ".pfx", ".kdbx")) or parts & _SECRET_DIRS):
+        raise PermissionError(f"{p.name}: refused, this looks like a credential file. Committee evidence "
+                              "must be your own documents; attach them on the Committee page.")
+    data = _data_dir().resolve()
+    for home in _hermes_roots():
+        if rp.is_relative_to(home) and not rp.is_relative_to(data):
+            raise PermissionError(f"{p.name}: refused, it is inside Hermes's own folder. Attach evidence "
+                                  "on the Committee page or give a path outside Hermes's folder.")
+
+
+def _read_paths(paths: list[Any], trusted: bool = False) -> list[dict[str, Any]]:
+    """``trusted`` only for paths the user typed (``hermes committee run``); paths that arrive
+    through the ``committee_open`` tool come from a model and are checked by ``_refuse_secret_path``."""
     from .committee import evidence as ev
     files = []
     for n, raw in enumerate(paths or []):
         p = Path(str(raw)).expanduser()
         if not p.is_file():
             raise FileNotFoundError(f"Evidence file not found: {p}. Attach it again or give its full path.")
+        if not trusted:
+            _refuse_secret_path(p)
         if p.stat().st_size > ev.MAX_FILE_BYTES:
             raise ValueError(f"{p.name}: over the {ev.MAX_FILE_BYTES // (1024 * 1024)} MB limit per file.")
         try:
@@ -384,7 +420,8 @@ def _read_paths(paths: list[Any]) -> list[dict[str, Any]]:
     return files
 
 
-def _attach_evidence(run: dict[str, Any], args: dict[str, Any], prior: Optional[list] = None) -> None:
+def _attach_evidence(run: dict[str, Any], args: dict[str, Any], prior: Optional[list] = None,
+                     trusted_paths: bool = False) -> None:
     """Evidence files from the page (a pack) and/or the chat (paths) → run copy; then decide who
     sees the pictures. A committee with pictures but no model that can see them is refused."""
     from .committee import evidence as ev
@@ -396,7 +433,7 @@ def _attach_evidence(run: dict[str, Any], args: dict[str, Any], prior: Optional[
         files += store.load_pack(base, str(args["evidence_pack"]), fids)
     paths = args.get("evidence_paths") or ([] if args.get("evidence_pack") else args.get("evidence_files"))
     if isinstance(paths, list) and paths:
-        files += _read_paths(paths)
+        files += _read_paths(paths, trusted=trusted_paths)
     if not files:
         return
     if sum(f["images"] for f in files) > ev.MAX_IMAGES:
@@ -506,12 +543,12 @@ def handle_open(args: dict, **kwargs) -> str:
                 run["agent_added_ignored"] = list(args["_ignored"])
         run["title"] = followup.clean_title(args.get("title"))
         prior = store.reuse_run_files(_data_dir(), prev) if prev is not None and args.get("follow_evidence") is not False else []
-        _attach_evidence(run, args, prior)
+        _attach_evidence(run, args, prior, trusted_paths=kwargs.get("_cli_trusted") is True)
         if prev is not None:
             run["follow_of"] = prev["id"]
             run["follow_prev"] = followup.prev_summary(prev)
         _price_slots(run)
-    except (cconfig.ConfigError, KeyError, ValueError, FileNotFoundError) as exc:
+    except (cconfig.ConfigError, KeyError, ValueError, FileNotFoundError, PermissionError) as exc:
         return _err(str(exc).strip("'\""))
     _publish(run)
     e = _entry(run, run["session_id"])
@@ -768,7 +805,8 @@ def _cli_run(args) -> int:
            "template": args.template, "review": False if args.lite else None, "research": True if args.research else None, "research_secs": args.research_secs, "max_minutes": args.max_minutes, "max_usd": args.max_usd,
            "title": args.title, "follow_of": args.follow_of,
            "deliberate": getattr(args, "deliberate", None), "deliberate_rounds": getattr(args, "rounds", None)}
-    opened = json.loads(handle_open({k: v for k, v in req.items() if v not in (None, "")}, session_id=""))
+    opened = json.loads(handle_open({k: v for k, v in req.items() if v not in (None, "")}, session_id="",
+                                     _cli_trusted=True))
     if not opened.get("ok"):
         print(f"Could not open: {opened.get('error')}")
         return 1

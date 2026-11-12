@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2
+
+- **Evidence paths from the chat are checked before reading.** `committee_open` paths come from a model, so a confused or prompt-injected turn could have named a Hermes credential file and sent it to every seat. Now, after resolving symlinks and junctions, the plugin refuses anything inside the Hermes home (the active profile and the shared root) other than its own data folder, and known credential files anywhere (`auth.json`, `.env*`, `webhook_subscriptions.json`, `*oauth*.json`, `mcp-tokens/`, SSH/cloud key folders, `.pem`/`.p12`/`.pfx`/`.kdbx`). It fails closed with a plain message. Files uploaded on the Committee page and paths typed into `hermes committee run` are unchanged. The trust flag is a keyword only the CLI passes, never a tool argument. Raised in the catalog review.
+
 ## 0.4.1
 
 - **No credential-store reads.** Billing detection no longer calls `hermes_cli.auth.read_credential_pool`
