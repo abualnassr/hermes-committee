@@ -380,8 +380,9 @@ files, use the Committee page, where you can see each file's size and the cost b
 
 ## Cost, privacy and risk (please read)
 
-- **One run makes 2 × seats + 1 model calls**: the seats answer, the seats vote, the chairman
-  decides. The page shows the count before you press Convene. Reasoning models can use many
+- **One run makes about 2 × seats + 1 model calls**: the seats answer, the seats vote, the chairman
+  decides. Research first adds 2, each photo or scanned page adds 1 (its description), and a debate
+  adds 1 + seats × rounds. The page shows the count before you press Convene. Reasoning models can use many
   tokens. Token counts are recorded for every call, with an **estimated cost** (tokens × list
   price) and a cost table by stage in the report. Your provider's bill is the real figure:
   cached prompts, discounts or taxes can make it differ.
