@@ -17,11 +17,26 @@ def name_labels(text: Any, names: dict[str, str]) -> Any:
         return text
     labs = "".join(sorted(names))
     out = re.sub(rf"\b[Rr]esponses? ([{labs}])\b", lambda m: names[m.group(1)], text)
-    out = re.sub(rf"\b([{labs}])('s|’s)\b", lambda m: names[m.group(1)] + m.group(2), out)
+
+    def seat(m: re.Match[str], tail: str = "") -> str:
+        # "Exhibit B", "Plan C", "Section D": a letter that names a document part, not a seat.
+        if _REF_BEFORE.search(m.string, 0, m.start()):
+            return m.group(0)
+        return names[m.group(1)] + tail
+
+    out = re.sub(rf"\b([{labs}])('s|’s)\b", lambda m: seat(m, m.group(2)), out)
     bare = "".join(l for l in labs if l != "A")
     if bare:
-        out = re.sub(rf"(?<![\w.\-/])([{bare}])(?![\w\-/%]|\.\w)", lambda m: names[m.group(1)], out)
+        out = re.sub(rf"(?<![\w.\-/])([{bare}])(?![\w\-/%]|\.\w)", seat, out)
     return out
+
+
+# Words after which a capital letter is a reference ("Exhibit B", "Schedule C", "Plan B"), never a seat label.
+_REF_BEFORE = re.compile(
+    r"\b(?:exhibits?|schedules?|appendix|appendices|annex(?:es)?|addend(?:um|a)|attachments?|sections?|clauses?|"
+    r"articles?|parts?|plans?|options?|forms?|grades?|class(?:es)?|types?|units?|buildings?|blocks?|levels?|"
+    r"tiers?|phases?|steps?|items?|figures?|tables?|pages?|rows?|columns?|zones?|lots?|categor(?:y|ies)|vitamins?)"
+    r"\s+(?:and\s+|or\s+|&\s+|,\s*)?$", re.IGNORECASE)
 
 
 def seat_of(label: Any, seats: list[dict[str, Any]]) -> str:

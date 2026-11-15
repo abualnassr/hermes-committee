@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3 (unreleased)
+
+- **Document references keep their letter.** The chairman's anonymous seat letters are turned into seat names in the verdict, and a bare letter was swapped too when it named a document part: "Exhibit B community rules" came out as "Exhibit Money Coach community rules". Letters after words such as Exhibit, Schedule, Appendix, Section, Plan or Form now stay as written; "B and C agree", "Response A" and "C's" still become names.
+
 ## 0.4.2
 
 - **Evidence paths from the chat are checked before reading.** `committee_open` paths come from a model, so a confused or prompt-injected turn could have named a Hermes credential file and sent it to every seat. Now, after resolving symlinks and junctions, the plugin refuses anything inside the Hermes home (the active profile and the shared root) other than its own data folder, and known credential files anywhere (`auth.json`, `.env*`, `webhook_subscriptions.json`, `*oauth*.json`, `mcp-tokens/`, SSH/cloud key folders, `.pem`/`.p12`/`.pfx`/`.kdbx`). It fails closed with a plain message. Files uploaded on the Committee page and paths typed into `hermes committee run` are unchanged. The trust flag is a keyword only the CLI passes, never a tool argument. Raised in the catalog review.
