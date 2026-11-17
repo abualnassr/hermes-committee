@@ -513,7 +513,8 @@ the Committee page and the full report.
 
 ```bash
 cd tests
-uv run --with "pytest>=8,<10" --with "fpdf2>=2.8,<3" --with "uharfbuzz>=0.39,<1" --with "fastapi>=0.110" python -m pytest -q
+uv run --with "pytest>=8,<10" --with "fpdf2>=2.8,<3" --with "uharfbuzz>=0.39,<1" --with "fastapi>=0.110" --with pymupdf python -m pytest -q
+cd ..
 hermes plugins validate .
 ```
 

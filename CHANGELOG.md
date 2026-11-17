@@ -1,8 +1,10 @@
 # Changelog
 
-## 0.4.3 (unreleased)
+## 0.4.3
 
 - **Document references keep their letter.** The chairman's anonymous seat letters are turned into seat names in the verdict, and a bare letter was swapped too when it named a document part: "Exhibit B community rules" came out as "Exhibit Money Coach community rules". Letters after words such as Exhibit, Schedule, Appendix, Section, Plan or Form now stay as written; "B and C agree", "Response A" and "C's" still become names.
+- **README:** a banner, and a new narrated demo: a real run choosing between two rental apartments (invented leases, budget and commute files; AI-generated photos). The MP4 is attached to this release.
+- **README development commands:** `hermes plugins validate .` now runs from the repo root (it ran inside `tests/` and failed there), and the test command adds `pymupdf`, so the six PDF checks run instead of being skipped.
 
 ## 0.4.2
 
