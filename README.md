@@ -18,10 +18,10 @@ decision, its dissent, next actions and a PDF report.
 <sub>Screenshots use an invented example and invented model names.</sub>
 
 
-https://github.com/user-attachments/assets/bca7420f-78f4-498e-965e-dc9e25051898
+https://github.com/user-attachments/assets/4d1e7c6c-7e81-4a7b-96b5-3ef99011a4bc
 
 
-<sub>A real committee run (used Tesla or new Corolla Hybrid?), replayed from the Desktop page. [Download the MP4](https://github.com/abualnassr/hermes-committee/releases/download/v0.4.1/hermes-committee-1080p.mp4).</sub>
+<sub>A real committee run (which apartment should a family rent?), replayed from the Desktop page, with narration. The leases, budget and commute files are invented for the demo and the photos are AI-generated. [Download the 1080p MP4](https://github.com/abualnassr/hermes-committee/releases/download/v0.4.3/hermes-committee-apartment-1080p.mp4).</sub>
 
 ---
 
