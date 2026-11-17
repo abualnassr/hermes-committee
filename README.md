@@ -1,3 +1,5 @@
+![Hermes Committee: one question, many minds, one verdict. Five hooded figures in a dark council hall; steps: answer, blind vote, debate, verdict.](assets/banner.jpg)
+
 # Hermes Committee
 
 **Ask several AI models the same hard question. They answer on their own, rank each other's
