@@ -541,4 +541,7 @@ fallback, drafts and the permission check, the reports, and the tool/hook glue.
 - The three-stage core (independent answers, anonymous peer ranking, chairman) builds on Andrej
   Karpathy's [llm-council](https://github.com/karpathy/llm-council).
 - Fonts: Noto Sans and Noto Naskh Arabic, SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
+- Model logos: single-colour icons from [lobe-icons](https://github.com/lobehub/lobe-icons), MIT
+  (`desktop/THIRD_PARTY_NOTICES.md`). The logos are their owners' trademarks, shown only to identify
+  which maker's model sits in a seat.
 - Code: MIT (see `LICENSE`).

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.6
+
+- **Model logos on the seats.** Each seat now shows its model maker's logo instead of the role's initials: on the Convene table, the chairman's bench, the Brief seat list and arc, the Decision arc and each answer's header. The logo follows the model, not the route (a GLM model through OpenRouter shows Z.ai). Seats whose maker is not known (a local or custom model) keep their initials. During the blind vote the logos hide with the names, so ballots stay anonymous. 17 single-colour logos from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT) are bundled in the page, so it makes no network call; notice in `desktop/THIRD_PARTY_NOTICES.md`.
+- **Seat arc spokes point at the seats.** On the Brief and Decision seat arcs, each line from the chair now aims at its seat's centre and starts at the circle's edge (before, it started at the circle's bottom point, so the outer lines looked off-centre).
+
 ## 0.4.5
 
 - **Sign-in seats show as Subscription.** A seat on a provider you reach by signing in, such as Grok through xAI OAuth (SuperGrok / Premium+), showed **Pay per use** and was costed at an API list price, because Hermes does not report how a configured provider is signed in. The plugin now reads that from Hermes's provider table (how each provider is set up, not your saved logins). Hermes's own billing table still decides first, so Nous and OpenRouter stay pay per use, and your choice in the budget menu still wins.

@@ -145,10 +145,10 @@ def test_sign_in_routes_count_as_subscription_but_hermes_billing_comes_first(mon
     monkeypatch.setitem(sys.modules, "agent.usage_pricing", up)
     monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth)
-    assert hc.billing("xai-oauth", "grok-4.7") == "subscription"
+    assert hc.billing("xai-oauth", "brand-chat-3") == "subscription"
     assert hc.billing("desk-app", "m") == "subscription"
     assert hc.billing("codex-like", "m") == "subscription"
-    assert hc.billing("nous", "x-ai/grok-4.7") == "paid"
-    assert hc.billing("xai", "grok-4.7") is None
-    assert hc.billing("deepseek", "deepseek-flash") is None
+    assert hc.billing("nous", "lab/brand-chat-3") == "paid"
+    assert hc.billing("xai", "brand-chat-3") is None
+    assert hc.billing("deepseek", "small-1.3-fast") is None
     assert hc.billing("not-registered", "m") is None
