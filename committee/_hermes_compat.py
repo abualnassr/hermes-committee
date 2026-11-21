@@ -6,10 +6,12 @@ list (``hostcaps``) and to the user's own choice in the budget menu.
 
 * ``price``  — Hermes's pricing tables (``agent.usage_pricing``), the same ones Hermes uses to record
   what a session cost.
-* ``billing`` — ``subscription`` when Hermes bills the route as included in a plan or the provider is a
-  subscription by name; ``paid`` when Hermes bills it per use; otherwise ``None`` and the user picks in the
-  budget menu. The plugin never reads Hermes's credential store (plugin catalog rule 11), not even the
-  type of a saved login.
+* ``billing`` — ``subscription`` when Hermes bills the route as included in a plan, when Hermes's provider
+  table says the provider is reached by signing in (``oauth_*``) or through a subscription app
+  (``external_process``), or when the provider is a subscription by name; ``paid`` when Hermes bills it per
+  use; otherwise ``None`` and the user picks in the budget menu. The provider table is static provider
+  metadata (how each provider is set up), not the user's logins: the plugin never reads Hermes's credential
+  store (plugin catalog rule 11), not even the type of a saved login.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 ENABLED = True                      # tests switch this off to stay offline and deterministic
 _PAID_MODES = {"official_models_api"}
+_SIGN_IN = ("oauth", "external_process")   # provider-table auth types that mean a plan, not an API key
 
 
 def _on() -> bool:
@@ -39,6 +42,15 @@ def billing(provider: str, model: str = "") -> Optional[str]:
             return "paid"
     except Exception:  # noqa: BLE001
         logger.debug("hermes-committee: billing route unavailable", exc_info=True)
+    # Hermes sends no sign-in type for configured providers in ``model.options``, so an OAuth route such as
+    # xai-oauth (SuperGrok / Premium+) would otherwise fall back to a hub's list price and read "pay per use".
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        auth = str(getattr(PROVIDER_REGISTRY.get(slug), "auth_type", "") or "").lower()
+        if auth.startswith(_SIGN_IN):
+            return "subscription"
+    except Exception:  # noqa: BLE001
+        logger.debug("hermes-committee: provider table unavailable", exc_info=True)
     if "subscription" in slug:
         return "subscription"
     return None

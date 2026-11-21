@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.5
+
+- **Sign-in seats show as Subscription.** A seat on a provider you reach by signing in, such as Grok through xAI OAuth (SuperGrok / Premium+), showed **Pay per use** and was costed at an API list price, because Hermes does not report how a configured provider is signed in. The plugin now reads that from Hermes's provider table (how each provider is set up, not your saved logins). Hermes's own billing table still decides first, so Nous and OpenRouter stay pay per use, and your choice in the budget menu still wins.
+
 ## 0.4.4
 
 - **Add a missing source before the seats start.** In the source review after Research first, a box under the list takes a link or a search. The run reads the link (or the top 3 new results of the search), adds the passages that bear on the question, marked *added by you* (your additions skip the two-passages-per-site limit), and restarts the 30 s wait so you can review them. Clicking in the box, or pressing **⏸ Wait**, holds the review for 3 minutes while you find a link. Up to 3 additions per run, one chairman call each; only web links are accepted.

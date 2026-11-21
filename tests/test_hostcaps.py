@@ -126,3 +126,29 @@ def test_hermes_detection_and_pricing_come_first_and_the_users_price_fills_gaps(
     # the user's choice still corrects a wrong detection
     hostcaps.set_billing("codex", "paid")
     assert hostcaps.price({"provider": "codex", "model": "gpt"})["billing"] == "unknown"
+
+
+def test_sign_in_routes_count_as_subscription_but_hermes_billing_comes_first(monkeypatch):
+    """xai-oauth: Hermes's billing table says "unknown" and model.options carries no sign-in type, so the
+    provider table decides. A route Hermes bills per use (nous, OAuth too) stays paid."""
+    import sys, types
+    from committee import _hermes_compat as hc
+    monkeypatch.setattr(hc, "_on", lambda: True)
+    modes = {"nous": "official_models_api", "codex-like": "subscription_included"}
+    up = types.ModuleType("agent.usage_pricing")
+    up.resolve_billing_route = lambda m, provider="": types.SimpleNamespace(billing_mode=modes.get(provider, "unknown"))
+    auth = types.ModuleType("hermes_cli.auth")
+    cfg = lambda a: types.SimpleNamespace(auth_type=a)
+    auth.PROVIDER_REGISTRY = {"xai-oauth": cfg("oauth_external"), "nous": cfg("oauth_device_code"),
+                              "desk-app": cfg("external_process"), "xai": cfg("api_key"), "deepseek": cfg("api_key")}
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.usage_pricing", up)
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.auth", auth)
+    assert hc.billing("xai-oauth", "grok-4.7") == "subscription"
+    assert hc.billing("desk-app", "m") == "subscription"
+    assert hc.billing("codex-like", "m") == "subscription"
+    assert hc.billing("nous", "x-ai/grok-4.7") == "paid"
+    assert hc.billing("xai", "grok-4.7") is None
+    assert hc.billing("deepseek", "deepseek-flash") is None
+    assert hc.billing("not-registered", "m") is None
