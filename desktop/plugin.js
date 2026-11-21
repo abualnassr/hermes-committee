@@ -133,6 +133,10 @@ const makerOf = (model, provider) => {
   const m = String(model || '').toLowerCase()
   return m ? find(m) : find(String(provider || '').toLowerCase())
 }
+// When Hermes answered a seat with another model (its own fallback, e.g. a rate-limited free model), the run
+// records it under run.switched[seat name]; the page shows that model, its logo and why.
+const servedBy = (run, name) => (run?.switched || {})[name] || null
+const swTitle = (sw, s) => `${shortModel(s.model) || 'The seat’s model'} was unavailable, so Hermes answered with ${shortModel(sw.model)} (${(sw.stages || []).length} step${(sw.stages || []).length === 1 ? '' : 's'}). Not an independent view.`
 // One logo: an <svg> that works inside the table SVG (x/y) and in HTML; paints in currentColor.
 function Logo({ mk, size, x, y, className }) {
   const L = LOGOS[mk]
@@ -575,11 +579,12 @@ function ArcStage({ run, sn }) {
             h('circle', { className: 'hc-tarc', r: R, strokeDasharray: ARC, strokeDashoffset: ARC * (1 - prog) }),
             active ? h('circle', { className: 'hc-tcomet', r: R, strokeDasharray: `${(ARC * 0.14).toFixed(1)} ${ARC.toFixed(1)}` }) : null,
             h('circle', { className: 'hc-tdisc', r }),
-            makerOf(s.model, s.provider) ? h(Logo, { mk: makerOf(s.model, s.provider), size: Math.round(r * 0.95), x: -Math.round(r * 0.95) / 2, y: -Math.round(r * 0.95) / 2, className: 'hc-ini' })
+            makerOf(servedBy(run, s.name)?.model || s.model, s.provider) ? h(Logo, { mk: makerOf(servedBy(run, s.name)?.model || s.model, s.provider), size: Math.round(r * 0.95), x: -Math.round(r * 0.95) / 2, y: -Math.round(r * 0.95) / 2, className: 'hc-ini' })
               : h('text', { className: 'hc-ini' }, initials(s.name)),
             h('text', { className: 'hc-let' }, s.label)),
           h('text', { className: 'hc-lbl', textAnchor: 'middle', y: -(R + 34) }, masked ? `Response ${s.label}` : `(${s.label}) ${fit(s.name, chars - 4)}`),
-          h('text', { className: 'hc-sub', textAnchor: 'middle', y: -(R + 14) }, fit(shortModel(s.model) || 'active model', chars + 2)),
+          servedBy(run, s.name) ? h('text', { className: 'hc-sub hc-swsub', textAnchor: 'middle', y: -(R + 14) }, h('title', null, swTitle(servedBy(run, s.name), s)), fit(`↺ ${shortModel(servedBy(run, s.name).model)}`, chars + 2))
+            : h('text', { className: 'hc-sub', textAnchor: 'middle', y: -(R + 14) }, fit(shortModel(s.model) || 'active model', chars + 2)),
           h('text', { className: 'hc-stance', textAnchor: 'middle', y: R + 27 }, fit(status, Math.max(chars + 6, 30))),
           h('text', { className: 'hc-tk', textAnchor: 'middle', y: R + 46 }, S.tokens ? `${fmtNum(S.tokens)} tok` : ''))
       }),
@@ -1932,9 +1937,10 @@ function SeatAnswer({ run, label, onClose }) {
   const list = (t, items) => (items?.length ? h('div', null, h('div', { className: 'hc-flbl' }, t), h('ul', { className: 'hc-list hc-sm' }, items.map((x, i) => h('li', { key: i }, x)))) : null)
   return h(Fragment, null,
     h('div', { className: 'hc-row' },
-      h('div', { className: 'hc-av', style: { background: pcolor(s.provider) } }, makerOf(s.model, s.provider) ? h(Logo, { mk: makerOf(s.model, s.provider), size: 17 }) : initials(s.name)),
+      h('div', { className: 'hc-av', style: { background: pcolor(s.provider) } }, makerOf(servedBy(run, s.name)?.model || s.model, s.provider) ? h(Logo, { mk: makerOf(servedBy(run, s.name)?.model || s.model, s.provider), size: 17 }) : initials(s.name)),
       h('div', { className: 'hc-grow', style: { minWidth: 0 } }, h('b', { className: 'hc-ellipsis', style: { display: 'block' } }, s.name),
-        h('div', { className: 'hc-xs hc-muted hc-ellipsis' }, `${shortModel(s.model) || 'active model'} · ${fmtSecs(run.seconds?.stage1?.[label])}`)),
+        h('div', { className: 'hc-xs hc-muted hc-ellipsis' }, `${shortModel(s.model) || 'active model'} · ${fmtSecs(run.seconds?.stage1?.[label])}`),
+        servedBy(run, s.name) ? h('div', { className: 'hc-xs hc-warn-t', title: swTitle(servedBy(run, s.name), s) }, `↺ answered by ${shortModel(servedBy(run, s.name).model)} instead`) : null),
       h('button', { className: 'hc-link', onClick: onClose }, '✕')),
     roleFit(run, label) ? h('div', { className: `hc-sm ${roleFit(run, label).fit === 'drifted' ? 'hc-warn-t' : 'hc-muted'}`, dir: 'auto' },
       `Role (chairman’s note): ${roleFit(run, label).fit === 'drifted' ? 'drifted' : 'kept to it'}${roleFit(run, label).note ? ` · ${roleFit(run, label).note}` : ''}`) : null,
@@ -2100,9 +2106,13 @@ function DecisionView({ run, onReplay, openChat, onFollow, openHelp }) {
             : h('ol', { className: 'hc-ol' }, items.map((a, i) => h('li', { key: i, dir: 'auto' }, a.action))))),
       panel('What would change this', null, h('div', { className: 'hc-pb' }, (c.reverse_if || []).length ? h('ul', { className: 'hc-ol' }, c.reverse_if.map((x, i) => h('li', { key: i, dir: 'auto' }, x)))
         : h('div', { className: 'hc-sm hc-muted' }, 'The chairman named nothing that would reverse it.')))),
+    Object.keys(run.switched || {}).length ? h('div', { className: 'hc-swnote', role: 'note' },
+      h('b', null, `↺ ${Object.keys(run.switched).length === 1 ? '1 seat was' : `${Object.keys(run.switched).length} seats were`} answered by another model. `),
+      `${Object.entries(run.switched).map(([who, sw]) => `${who}: ${shortModel(sw.assigned) || 'its model'} was unavailable, so Hermes used ${shortModel(sw.model)}`).join('; ')}. `,
+      'This is Hermes’s fallback (often a rate-limited free model). Those seats are not independent views, and their cost is counted at the model that answered.') : null,
     h('div', { className: 'hc-lower' },
       panel('How the table stood', null,
-        h(MiniArc, { height: 190, seats: seats.map(s => { const rf = roleFit(run, s.label); return { key: s.label, name: s.name, model: s.model, provider: s.provider, stance: stances[s.label] || (run.answers?.[s.label]?.status === 'failed' ? 'failed' : ''),
+        h(MiniArc, { height: 190, seats: seats.map(s => { const rf = roleFit(run, s.label); return { key: s.label, name: s.name, model: servedBy(run, s.name)?.model || s.model, provider: s.provider, stance: stances[s.label] || (run.answers?.[s.label]?.status === 'failed' ? 'failed' : ''),
           drift: rf?.fit === 'drifted',
           title: `(${s.label}) ${s.name} · ${shortModel(s.model) || 'active model'}${stances[s.label] === 'dissent' ? ' · dissent' : stances[s.label] === 'agree' ? ' · in line with the decision' : ''}${rf ? `\nRole: ${rf.fit === 'drifted' ? 'drifted' : 'kept'}${rf.note ? ` · ${rf.note}` : ''}` : ''}` } }) }),
         h('div', { className: 'hc-legend2' }, h('span', null, h('i', { style: { background: 'var(--hc-ok)' } }), 'In line with the decision'),
@@ -2135,7 +2145,8 @@ function DecisionTabs({ run, tab, setTab, openHelp }) {
       if (open === l) return h('div', { key: l, className: 'hc-ansopen' }, h(SeatAnswer, { run, label: l, onClose: () => setOpen(null) }))
       return h('button', { key: l, className: 'hc-ansrow', onClick: () => setOpen(l), title: 'Read this seat’s answer' },
         h('span', { className: 'hc-rk' }, (run.ranking || []).length ? i + 1 : '·'),
-        h('div', { style: { minWidth: 0 } }, h('b', { className: 'hc-ellipsis', style: { display: 'block' } }, s.name), h('div', { className: 'hc-xs hc-muted hc-mono hc-ellipsis' }, shortModel(s.model) || 'active model')),
+        h('div', { style: { minWidth: 0 } }, h('b', { className: 'hc-ellipsis', style: { display: 'block' } }, s.name), servedBy(run, s.name) ? h('div', { className: 'hc-xs hc-warn-t hc-mono hc-ellipsis', title: swTitle(servedBy(run, s.name), s) }, `↺ ${shortModel(servedBy(run, s.name).model)}`)
+          : h('div', { className: 'hc-xs hc-muted hc-mono hc-ellipsis' }, shortModel(s.model) || 'active model')),
         h('div', { dir: 'auto' }, roleFit(run, l)?.fit === 'drifted' ? h('span', { className: 'hc-drift-tag', title: roleFit(run, l).note }, 'drifted from role') : null,
           a.status === 'ok' ? a.summary : h('span', { className: 'hc-warn-t' }, `No answer (${a.error || 'not run'})`)))
     })
@@ -2470,6 +2481,9 @@ const CSS = `
 .hc-let{fill:var(--hc-acc);font:700 22px var(--hc-serif);text-anchor:middle;dominant-baseline:central;opacity:0;transition:opacity .3s}
 .hc-masked .hc-ini{opacity:0}.hc-masked .hc-let{opacity:1}
 .hc-logo{fill:currentColor;flex:none;display:block;overflow:visible}
+.hc-swsub{fill:var(--hc-warn)!important}
+.hc-swnote{margin:0 0 14px;padding:10px 14px;border:1px solid color-mix(in srgb,var(--hc-warn) 45%,var(--hc-line));border-radius:10px;background:color-mix(in srgb,var(--hc-warn) 8%,var(--hc-panel));font-size:12.5px;line-height:1.5}
+.hc-swnote b{color:var(--hc-warn)}
 svg .hc-logo{color:var(--hc-fg)}svg.hc-logo.hc-ini{fill:var(--hc-fg)}.hc-mseat .hc-logo{fill:var(--hc-fg);pointer-events:none}
 .hc-blogo{fill:var(--hc-fg)}.hc-av2 .hc-logo{color:var(--hc-fg)}.hc-av-chair .hc-logo{color:var(--hc-acc)}.hc-av .hc-logo{color:#fff}
 .hc-node .hc-lbl{fill:var(--hc-fg);font-size:14px;transition:opacity .3s}.hc-node .hc-sub{fill:var(--hc-mut);font:12px var(--hc-mono);transition:opacity .3s}

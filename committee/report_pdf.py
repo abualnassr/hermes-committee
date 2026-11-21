@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .config import model_label
+from .config import answered_by, model_label
 from .engine import usage_totals
 from . import __version__
 from .report_md import (DISCLAIMER, PRODUCT, about, arg_parts, debate_tally, delib_decided, delib_last, delib_line,
@@ -816,7 +816,7 @@ def _seat_band(w: _W, s: dict, a: dict, place_txt: str):
     pdf.set_xy(pdf.l_margin + 5, y + 8.6)
     pdf.set_font("Sans", "", SMALL)
     pdf.set_text_color(*MUTED)
-    bits = [model_label(s), f"confidence {conf_text(a.get('confidence'))}"] + ([place_txt] if place_txt else [])
+    bits = [model_label(s) + (s.get("_answered_by") or ""), f"confidence {conf_text(a.get('confidence'))}"] + ([place_txt] if place_txt else [])
     pdf.cell(pdf.epw - 8, 4.5, _fit(pdf, _plain("   ·   ".join(bits)), pdf.epw - 8))
     pdf.set_y(y + h + 4)
 
@@ -875,12 +875,12 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
     for s in _seats(run):
         a = run["answers"].get(s["label"]) or {}
         r = rank.get(s["label"])
-        rows.append([s["name"], short_model(s), "yes" if a.get("status") == "ok" else a.get("status", "not run"),
+        rows.append([s["name"], short_model(s) + answered_by(run, s["name"]), "yes" if a.get("status") == "ok" else a.get("status", "not run"),
                      conf_text(a.get("confidence")),
                      f"{ordinal(place[s['label']])} of {n_ranked}" if r else "–", str(r["first_votes"]) if r else "–"])
     w.table(["Seat", "Model", "Answered", "Confidence", "Peer place", "1st votes"], rows, (30, 44, 20, 28, 22, 18),
             align=("LEFT", "LEFT", "LEFT", "LEFT", "RIGHT", "RIGHT"))
-    w.para(f"Chairman: {short_model(run['chairman'])}. Provider routes are listed with each seat in Appendix A.",
+    w.para(f"Chairman: {short_model(run['chairman'])}{answered_by(run, 'Chairman')}. Provider routes are listed with each seat in Appendix A.",
            size=SMALL, color=MUTED)
 
     w.heading("Positions")
@@ -935,7 +935,7 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
                 pdf.ln(8)
         pdf.start_section(_plain(s["name"]), level=1)
         r = rank.get(s["label"])
-        _seat_band(w, s, a, f"peer place {ordinal(place[s['label']])} of {n_ranked}" if r else "")
+        _seat_band(w, {**s, "_answered_by": answered_by(run, s["name"])}, a, f"peer place {ordinal(place[s['label']])} of {n_ranked}" if r else "")
         if s.get("instructions"):
             w.heading("Instructions given", above=1)
             w.para(s["instructions"], color=MUTED)

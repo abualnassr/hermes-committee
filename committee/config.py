@@ -58,6 +58,24 @@ DELIBERATE_CHOICES = ("material", "action", "always", "never")
 DELIBERATE_DEFAULT = "material"
 
 
+def free_model_warnings(slots: list) -> list:
+    """Free models (``:free``) are often rate-limited by the provider behind them; when one is refused,
+    Hermes answers with the user's main model instead. Said before the run, in plain words."""
+    free = [s.get("name") or "Chairman" for s in slots if str(s.get("model") or "").endswith(":free")]
+    if not free:
+        return []
+    who = ", ".join(free)
+    return [f"{who} use{'s' if len(free) == 1 else ''} a free model (:free). Free models are often rate-limited; "
+            "a refused call is answered by your main model instead (the report says so), or fails if that is "
+            "refused too. Paid models are more reliable."]
+
+
+def answered_by(run: dict, who: str) -> str:
+    """' (answered by <model>)' when Hermes answered this seat with another model (see engine.served_by)."""
+    sw = (run.get("switched") or {}).get(who)
+    return f" (answered by {str(sw['model']).rsplit('/', 1)[-1]})" if sw else ""
+
+
 def model_label(slot: dict[str, Any]) -> str:
     if slot.get("provider") or slot.get("model"):
         return f"{slot.get('provider') or 'default'} / {slot.get('model') or 'default'}"
@@ -161,6 +179,7 @@ def build_roster(settings: dict[str, Any] | None, *, preset: str | None = None, 
     if len(distinct) == 1 and n > 1:
         warnings.append("All seats use the same model, so their answers will be correlated. "
                         "Assign different models in a preset for independent views.")
+    warnings += free_model_warnings([*roster, chairman])
 
     return {
         "preset": preset_name,

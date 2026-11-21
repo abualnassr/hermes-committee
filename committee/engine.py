@@ -333,7 +333,7 @@ def _parallel(jobs: dict[str, Callable[[], Any]], *, timeout: float, cancel: thr
                 try:
                     results[key] = (True, f.result())
                 except Exception as exc:  # noqa: BLE001 - a seat failure must not sink the stage
-                    results[key] = (False, f"{type(exc).__name__}: {_clip(str(exc), 300)}")
+                    results[key] = (False, describe_error(exc))
                 on_done(key, results[key][0])
         for f in pending:
             results[futs[f]] = (False, f"deadline: no answer within {int(timeout)} s"
@@ -343,18 +343,111 @@ def _parallel(jobs: dict[str, Callable[[], Any]], *, timeout: float, cancel: thr
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+def _model_base(model: str) -> str:
+    """A model id without its route prefix, variant suffix ([1m]) or tier (:free), for comparing."""
+    m = re.sub(r"\[[^\]]*\]$", "", str(model or "").strip().lower())
+    return m.split(":", 1)[0].rsplit("/", 1)[-1]
+
+
+def served_by(slot: dict[str, Any], reply: Reply) -> Optional[tuple[str, str]]:
+    """(provider, model) when a different model answered than the seat asked for: Hermes falls back to the
+    user's main model when the seat's model is refused (a rate-limited free model, an outage). None when it
+    matches, or when the seat set no model. A dated or prefixed id of the same model still matches."""
+    want, got = _model_base(slot.get("model") or ""), _model_base(reply.model or "")
+    if not want or not got or want == got or got.startswith(want) or want.startswith(got):
+        return None
+    return reply.provider or "", reply.model or ""
+
+
+def _price_of(provider: str, model: str) -> dict[str, Any]:
+    try:
+        return hostcaps.price({"provider": provider, "model": model})
+    except Exception:  # noqa: BLE001 - an unknown price is reported as unknown, never as $0
+        return {"billing": "unknown"}
+
+
 def _record_usage(run: dict[str, Any], stage: str, who: str, slot: dict[str, Any], reply: Reply, secs: float,
                   thinking: str = "default"):
     u = reply.usage or {}
-    charged, lst, known = pricing.cost(slot, u.get("input_tokens"), u.get("output_tokens"))
-    if known and isinstance(u.get("cost_usd"), (int, float)) and (slot.get("price") or {}).get("billing") == "paid":
+    sw = served_by(slot, reply)
+    priced = {**slot, "price": _price_of(*sw)} if sw else slot   # the model that answered sets the cost
+    charged, lst, known = pricing.cost(priced, u.get("input_tokens"), u.get("output_tokens"))
+    if known and isinstance(u.get("cost_usd"), (int, float)) and (priced.get("price") or {}).get("billing") == "paid":
         charged = float(u["cost_usd"])                     # the provider's own figure wins when it sends one
     with _USAGE_LOCK:
         run["usage"].append({"stage": stage, "who": who, "provider": reply.provider or slot.get("provider") or "",
                              "model": reply.model or slot.get("model") or "",
                              "input_tokens": u.get("input_tokens"), "output_tokens": u.get("output_tokens"),
                              "cost_usd": u.get("cost_usd"), "cost_est": round(charged, 6), "cost_list": round(lst, 6),
-                             "cost_known": known, "secs": round(secs, 1), "thinking": thinking})
+                             "cost_known": known, "secs": round(secs, 1), "thinking": thinking,
+                             **({"assigned": model_label(slot)} if sw else {})})
+        if sw:
+            _note_switch(run, stage, who, slot, *sw)
+
+
+_STAGE_WORDS = {"stage1": "answer", "review": "ranking", "deliberate": "debate", "chair": "verdict",
+                "agenda": "agenda", "describe": "picture descriptions", "research": "research"}
+
+
+def _note_switch(run: dict[str, Any], stage: str, who: str, slot: dict[str, Any], provider: str, model: str) -> None:
+    """Record (once per seat) that another model answered for this seat, and say so in the warnings that the
+    page, the chat result and both reports show."""
+    sw = run.setdefault("switched", {})
+    first = who not in sw
+    entry = sw.setdefault(who, {"provider": provider, "model": model, "assigned": model_label(slot), "stages": []})
+    if stage not in entry["stages"]:
+        entry["stages"].append(stage)
+    if first:
+        short = lambda m: str(m or "").rsplit("/", 1)[-1]
+        run["warnings"].append(
+            f"{who}: {short(slot.get('model'))} was unavailable (often a rate limit on a free model), so Hermes answered "
+            f"with your fallback model {short(model)} instead. That seat's answer, ballot and cost come from "
+            f"{short(model)}, so it is not an independent view.")
+
+
+def describe_error(exc: BaseException) -> str:
+    """One short line for a failed call: what kind of refusal it was and the provider's own words, instead of
+    the full error body (a rate-limited run printed pages of JSON)."""
+    raw = str(exc)
+    code = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    if not code:
+        m = re.search(r"(?:Error code|status(?:_code)?)[:= ]+(\d{3})", raw) or re.search(r"\b(429|402|401|403|404)\b", raw)
+        code = int(m.group(1)) if m else None
+    said = re.search(r"'raw':\s*'([^']{8,})'", raw) or re.search(r"'message':\s*'([^']{8,})'", raw) \
+        or re.search(r'"message":\s*"([^"]{8,})"', raw)
+    detail = _clip(re.sub(r"\s*Please retry shortly.*$|\s*https?://\S+", "", said.group(1) if said else raw), 160)
+    kind = {429: "rate-limited (429)", 402: "out of credit or over the plan's limit (402)",
+            401: "the provider refused the key (401)", 403: "the provider refused the key (403)",
+            404: "model not found (404)"}.get(int(code) if code else 0)
+    if kind is None:
+        low = raw.lower()
+        kind = "timed out" if "timeout" in low or "timed out" in low else type(exc).__name__
+    return f"{kind}: {detail}" if detail else kind
+
+
+def failure_summary(run: dict[str, Any], results: dict[str, tuple[bool, Any]]) -> str:
+    """Why the seats failed, grouped, with what to change: one or two lines, not every error."""
+    failed = [(s, results.get(s["label"], (False, ""))[1]) for s in run["seats"] if not results.get(s["label"], (False,))[0]]
+    if not failed:
+        return ""
+    groups: dict[str, list[str]] = {}
+    for s, err in failed:
+        groups.setdefault(str(err).split(":", 1)[0] or "failed", []).append(s["name"])
+    parts = [f"{', '.join(names)}: {kind}" for kind, names in groups.items()]
+    tips = []
+    if any(k.startswith("rate-limited") for k in groups):
+        free = any(str(s.get("model") or "").endswith(":free") for s, _ in failed)
+        provs = {s.get("provider") for s, _ in failed}
+        tips.append(("Free models are often rate-limited by the provider behind them. " if free else "")
+                    + ("These seats share one provider and key; spread seats over more providers or use paid models."
+                       if len(provs) == 1 else "Use paid models or wait a few minutes."))
+    if any("credit" in k for k in groups):
+        tips.append("Add credit or pick another provider.")
+    if any("key" in k for k in groups):
+        tips.append("Check the provider's key with `hermes model`.")
+    if any("not found" in k for k in groups):
+        tips.append("Pick a model the provider lists.")
+    return "; ".join(parts) + "." + (" " + " ".join(tips) if tips else "")
 
 
 _USAGE_LOCK = threading.Lock()
@@ -784,6 +877,9 @@ def run_stage1(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress:
     if ok_n < run["quorum"]:
         run["status"], run["next_stage"] = "failed", None
         run["error"] = f"Only {ok_n} of {n} seats answered; the quorum is {run['quorum']}."
+        why = failure_summary(run, results)
+        if why:
+            run["error"] += " " + why
         return
     run["status"] = "stage1_done"
     run["next_stage"] = "review" if run["review"] and ok_n >= 2 and not run.setdefault("skipped", {}).get("review") \

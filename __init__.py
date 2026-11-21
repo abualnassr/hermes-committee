@@ -604,9 +604,11 @@ def _final_payload(run: dict[str, Any]) -> dict[str, Any]:
     seats = []
     for s in sorted(run["seats"], key=lambda s: s["label"]):
         a = run["answers"].get(s["label"]) or {}
+        sw = (run.get("switched") or {}).get(s["name"])
         seats.append({"response": s["label"], "seat": s["name"], "model": cconfig.model_label(s),
                       "status": a.get("status", "not run"), "position": a.get("summary") or a.get("error"),
-                      "confidence": a.get("confidence")})
+                      "confidence": a.get("confidence"),
+                      **({"answered_by": f"{sw['provider']} / {sw['model']}"} if sw else {})})
     return {"ok": run["status"] == "done", "run_id": run["id"], "status": run["status"], "error": run.get("error"),
             "decision": chair.get("decision"), "confidence": chair.get("confidence"),
             "final_answer": chair.get("final_answer"), "dissent": chair.get("dissent"),

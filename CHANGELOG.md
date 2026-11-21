@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.7
+
+- **Seats answered by another model are labelled.** When a seat's model is refused (a rate-limited free model is
+  the common case), Hermes answers with your main model instead, and the run used to report the seat's own model.
+  Now the run notices: the Convene table and the answer show ↺ and the model that answered (with its logo), the
+  Decision page and both reports say which seats were affected, and their calls are costed at the model that
+  answered, not at the free model's $0. The answer is kept, so the run still finishes, but it is marked as not an
+  independent view.
+- **Refusals in one line.** A failed seat shows what kind of refusal it was (rate-limited, out of credit, key
+  refused, model not found, timed out) and the provider's own words, instead of the full error body. A run where
+  too few seats answer says which seats failed, why, and what to change (for example: spread seats over more
+  providers or use paid models).
+- **Free-model warning before the run.** The Brief, the chat result and the terminal warn when a seat or the
+  chairman uses a free model (`:free`): they are often rate-limited, and a refused call is answered by your main
+  model or fails.
+- **README refreshed.** New screenshots show the seat logos (the demo now uses real model names from
+  several makers, replayed with a scripted model), and the README explains free models, the ↺ fallback
+  label and the one-line refusal reasons.
+
 ## 0.4.6
 
 - **Model logos on the seats.** Each seat now shows its model maker's logo instead of the role's initials: on the Convene table, the chairman's bench, the Brief seat list and arc, the Decision arc and each answer's header. The logo follows the model, not the route (a GLM model through OpenRouter shows Z.ai). Seats whose maker is not known (a local or custom model) keep their initials. During the blind vote the logos hide with the names, so ballots stay anonymous. 17 single-colour logos from [lobe-icons](https://github.com/lobehub/lobe-icons) (MIT) are bundled in the page, so it makes no network call; notice in `desktop/THIRD_PARTY_NOTICES.md`.

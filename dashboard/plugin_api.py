@@ -569,6 +569,7 @@ def _estimate_for(body: dict, roster: dict, settings: dict) -> dict[str, Any]:
         if failed and est["input_tokens"] / max(1, est["calls"]) * 1.2 >= failed * 0.9:
             ctx_warn.append(f"{slot.get('name') or 'Chairman'} may get too much text: its model failed before at "
                             f"about {int(failed):,} tokens. Remove some files or pick another model.")
+    ctx_warn += _c.free_model_warnings([*run["seats"], run["chairman"]])
     return {**est, "limit": lim, "low_fmt": pricing.fmt(est["low"]), "high_fmt": pricing.fmt(est["high"]),
             "context_warnings": ctx_warn,
             "list_high_fmt": pricing.fmt(est["list_high"]), "limit_fmt": pricing.fmt(lim) if lim else None,

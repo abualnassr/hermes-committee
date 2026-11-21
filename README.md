@@ -15,7 +15,7 @@ decision, its dissent, next actions and a PDF report.
 | [![The brief: question, evidence, Research first, and the committee's seats with one open for editing](docs/images/brief.png)](docs/images/brief.png) | [![Convene: the evidence box with files and web sources over the table, seats on an arc debating, the chairman's bench, timeline and live log](docs/images/convene.png)](docs/images/convene.png) | [![Decision: the ruling, figures, next actions with owners, and how the table stood](docs/images/decision.png)](docs/images/decision.png) |
 | Ask, add evidence, switch on Research first, and give each seat a model, instructions and a thinking level. | Watch the research, the answers, the blind vote and the debate as they happen. | The verdict, its confidence, next actions, dissent and the ranking. |
 
-<sub>Screenshots use an invented example and invented model names.</sub>
+<sub>Screenshots use an invented example, replayed with a scripted model: the model names are real (they show each maker's logo), the answers are not theirs.</sub>
 
 
 https://github.com/user-attachments/assets/4d1e7c6c-7e81-4a7b-96b5-3ef99011a4bc
@@ -148,6 +148,8 @@ Then **click any seat** to edit it in the panel on the right:
 - **Role**: what the seat is, for example *Mechanical Engineer*.
 - **AI model**: click it to open a searchable list of every model your Hermes is connected to,
   grouped by provider. *Your active Hermes model* is always the first choice.
+- Each seat shows its model maker's **logo** (Google, Anthropic, Qwen, Mistral, …) on the page; a model
+  whose maker is not known, such as a local one, keeps the seat's initials.
 - **Instructions**: how this seat should think, for example *"You are a mechanical engineer. Judge
   failure modes from the evidence and give numbers."* The **+ chips** under the box add common
   ones (*Be skeptical of the leading option*, *Give numbers, not adjectives*, …).
@@ -158,6 +160,11 @@ reasoning model works best there.
 
 > **Tip:** different models give more independent views. If every seat uses the same model, the
 > answers will be similar, and the page warns you.
+
+> **Free models (`:free`)** are often rate-limited by the provider behind them, and the page warns
+> you before the run. When a seat's model is refused, Hermes may answer with your main model instead:
+> the seat then shows **↺** and the model that answered, the Decision page and the reports say so, and
+> its cost is counted at that model. Paid models, or seats spread over a few providers, are more reliable.
 
 ### 5. Press **Convene ▶**
 
@@ -388,7 +395,8 @@ files, use the Committee page, where you can see each file's size and the cost b
 | "The committee backend is not answering" | Run `hermes gateway restart`. The page's backend loads when the gateway starts. |
 | The run finished but there is no PDF | `hermes gateway restart`, then `hermes committee report <run-id>` creates the PDF from the saved run, with no new model calls. |
 | "One-time permission needed" | Copy the command shown, run it in a terminal, press Convene again. See 🔒 above. |
-| A seat says **no answer** | Its provider failed or timed out. The run continues while enough seats answered (the quorum). Pick a different model for that seat next time. |
+| A seat says **no answer** | Its provider failed or timed out; the seat shows a one-line reason (rate-limited, out of credit, key refused, model not found, timed out). The run continues while enough seats answered (the quorum); if too few did, it says which seats failed, why, and what to change. Pick a different model for that seat next time. |
+| A seat shows **↺** and another model's name | Its own model was refused (often a rate-limited free model), so Hermes answered with your main model. The answer is kept but is not an independent view. Pick a paid model or another provider for that seat. |
 | The request was typed in the chat but did not start | Press **Enter** in that chat. |
 | Not sure every model works | `hermes committee doctor` makes one tiny call per seat and reports any that fail. |
 
@@ -405,6 +413,8 @@ files, use the Committee page, where you can see each file's size and the cost b
 - **The budget is checked before each call, at the call's worst case.** A call cut off by the time
   limit or by Stop may still finish at the provider: the plugin counts it at its maximum cost.
   Calls on models with no known price are not counted; the page warns before you start.
+  A call Hermes answers with a different model (its fallback) is counted at the price of the model
+  that answered.
 - **Your question and evidence go to every seat's provider** and the chairman's. With four seats on
   four providers, the same data reaches four companies. Keep sensitive work on providers you trust.
 - **Stop** prevents new model calls within about a second. Calls already sent cannot be recalled:

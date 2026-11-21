@@ -5,7 +5,7 @@ import re
 import time
 from typing import Any, Optional
 
-from .config import model_label
+from .config import answered_by, model_label
 from .engine import seat_by_label, usage_totals
 
 PRODUCT = "Hermes Committee"
@@ -380,9 +380,9 @@ def render(run: dict[str, Any]) -> str:
         a = run["answers"].get(s["label"]) or {}
         r = rank.get(s["label"])
         avg = "%.2f" % r["avg_rank"] if r else "–"
-        out.append(f"| {_cell(s['name'])} | {_cell(model_label(s))} | {'yes' if a.get('status') == 'ok' else a.get('status', 'not run')} | "
+        out.append(f"| {_cell(s['name'])} | {_cell(model_label(s) + answered_by(run, s['name']))} | {'yes' if a.get('status') == 'ok' else a.get('status', 'not run')} | "
                    f"{_conf(a.get('confidence'))} | {avg} |")
-    out.append(f"Chairman: {model_label(run['chairman'])}")
+    out.append(f"Chairman: {model_label(run['chairman'])}{answered_by(run, 'Chairman')}")
     drifted = [x for x in (run.get("chair") or {}).get("role_fit") or [] if x.get("fit") == "drifted"]
     if drifted:
         out.append("_Drifted from role (chairman's note):_ " + "; ".join(
@@ -444,7 +444,7 @@ def render(run: dict[str, Any]) -> str:
     out.append("## Seat answers")
     for s in sorted(run["seats"], key=lambda s: s["label"]):
         a = run["answers"].get(s["label"]) or {}
-        out.append(f"### {s['name']} ({model_label(s)})")
+        out.append(f"### {s['name']} ({model_label(s)}{answered_by(run, s['name'])})")
         if s.get("instructions"):
             out.append(f"_Instructions:_ {s['instructions']}")
             rf = next((x for x in (run.get("chair") or {}).get("role_fit") or [] if x.get("label") == s["label"]), None)
