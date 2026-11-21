@@ -40,6 +40,14 @@ def test_template_override_and_review_flag(settings):
                                   "total_if_debate": 5}
 
 
+def test_engineering_review_template(settings):
+    r = c.build_roster(settings, template="engineering-review")
+    assert [s["name"] for s in r["seats"]] == ["Security Reviewer", "Performance Engineer", "Maintainer", "Devil's Advocate"]
+    assert all(s["instructions"] for s in r["seats"]) and r["decision_focus"] is True
+    assert "cannot run code" in r["chairman_guidance"] and "severity" in r["chairman_guidance"]
+    assert "engineering-review" in TEMPLATES
+
+
 @pytest.mark.parametrize("kwargs,msg", [
     ({"preset": "nope"}, "Unknown preset"),
     ({"template": "nope"}, "Unknown template"),

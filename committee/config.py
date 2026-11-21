@@ -189,6 +189,6 @@ def planned_calls(roster: dict[str, Any]) -> dict[str, int]:
     review = n if roster["review"] else 0
     pictures = len((roster.get("evidence_index") or {}).get("images") or [])
     delib = (1 + n * (roster.get("deliberate_rounds") or 1)) if (roster.get("deliberate") or "never") != "never" else 0
-    web = 2 if roster.get("research") else 0
+    web = 3 if roster.get("research") else 0
     return {"research": web, "describe": pictures, "stage1": n, "review": review, "deliberate": delib, "chairman": 1,
             "total": web + pictures + n + review + 1, "total_if_debate": web + pictures + n + review + 1 + delib}

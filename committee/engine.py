@@ -557,30 +557,33 @@ def run_research(run: dict[str, Any], llm: LLM, cancel: threading.Event, progres
     web.pop("done", None)
     run["web"] = web
     if web.get("items") and interactive(run, cancel):
-        _review_sources(run, cancel, progress)
+        _review_sources(run, cancel, progress, lambda req: research.add_more(run, llm, call, run["chairman"], req))
     research.renumber(web)
     run["timeline"].append({"t": _now(), "event": "research", "ok": bool(web["items"]), "items": len(web["items"]),
                             "searched": web.get("searched", 0), "dropped": web.get("dropped", 0)})
 
 
-def _sources_answer(run: dict[str, Any], cancel: Any) -> Optional[list[str]]:
-    """The page's answer to the source review: the ids to keep, or None while there is none."""
+def _source_requests(run: dict[str, Any], cancel: Any) -> list[dict[str, Any]]:
+    """New page requests during the source review: {'kind': 'sources', keep} or {'kind': 'more', url|query}."""
     reader = getattr(cancel, "requests", None)
     try:
         reqs = reader() if callable(reader) else []
     except Exception:  # noqa: BLE001
-        return None
+        return []
     seen = run.setdefault("requests_applied", [])
+    out = []
     for r in reqs or []:
         rid = str(r.get("id") or "")
-        if r.get("kind") == "sources" and rid and rid not in seen:
+        if r.get("kind") in ("sources", "more", "hold") and rid and rid not in seen:
             seen.append(rid)
-            return [str(x) for x in r.get("keep") or []]
-    return None
+            out.append(r)
+    return out
 
 
-def _review_sources(run: dict[str, Any], cancel: Any, progress: Progress) -> None:
-    """Pause up to research.REVIEW_WAIT_S for the user to untick sources. Paused time does not count."""
+def _review_sources(run: dict[str, Any], cancel: Any, progress: Progress,
+                    more: Optional[Callable[[dict[str, Any]], str]] = None) -> None:
+    """Pause up to research.REVIEW_WAIT_S for the user to untick sources, add a link or run one more search
+    (each addition restarts the wait). Paused time does not count."""
     web = run["web"]
     t0 = _now()
     before = dict(run.get("live") or {})
@@ -589,12 +592,39 @@ def _review_sources(run: dict[str, Any], cancel: Any, progress: Progress) -> Non
     progress(f"Paused · review the {len(web['items'])} web sources on the Committee page, "
              f"or it continues with all of them in {research.REVIEW_WAIT_S} s")
     keep = None
+    until = t0 + research.REVIEW_WAIT_S
+    adds = 0
     try:
         while True:
             if cancel.is_set():
                 raise Cancelled()
-            keep = _sources_answer(run, cancel)
-            if keep is not None or _now() - t0 >= research.REVIEW_WAIT_S:
+            for r in _source_requests(run, cancel):
+                if r.get("kind") == "sources":
+                    keep = [str(x) for x in r.get("keep") or []]
+                    break
+                ask = run["live"]["sources"]
+                if r.get("kind") == "hold":
+                    until = max(until, _now() + research.HOLD_S)
+                    ask.update(until=until, held=True)
+                    progress("Source review · held for you to add a source")
+                    continue
+                if more is None or adds >= research.MORE_MAX:
+                    ask["note"] = f"At most {research.MORE_MAX} additions per run."
+                    progress("Source review · no more additions")
+                    continue
+                adds += 1
+                ask.update(busy=("Reading the link…" if r.get("url") else "Searching…"), note="")
+                progress("Source review · adding what you asked for")
+                try:
+                    note = more(r)
+                except Exception as exc:  # noqa: BLE001 - an addition never ends the review
+                    note = f"Could not add it: {type(exc).__name__}"
+                until = _now() + research.REVIEW_WAIT_S
+                ask.update(busy="", note=note, until=until, left=research.MORE_MAX - adds)
+                run["timeline"].append({"t": _now(), "event": "sources_more", "kind": "url" if r.get("url") else "search",
+                                        "note": note})
+                progress(f"Source review · {note}")
+            if keep is not None or _now() >= until:
                 break
             time.sleep(_POLL_S)
     finally:

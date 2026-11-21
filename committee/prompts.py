@@ -139,7 +139,10 @@ def _files_block(run: dict[str, Any], see_images: bool) -> list[str]:
     if secs:
         parts.append("# Evidence files\nNumbered sections from the user's files. Cite them by number, for "
                      "example [E3], when you rely on them. Do not invent facts beyond them; say so when "
-                     "evidence is missing.\n\n" + "\n\n".join(
+                     "evidence is missing." + (" Code files have numbered lines (\"12| …\"): when you refer to code, "
+                     "give the file and line, for example [E3] main.js:120, and quote the line."
+                     if any("lines, numbered" in (s.get("locator") or "") for s in secs) else "")
+                     + "\n\n" + "\n\n".join(
                          f"## [{s['id']}] {s['source']}" + (f" · {s['locator']}" if s.get("locator") else "")
                          + f"\n{s['text'].strip()}" for s in secs))
     if imgs:
@@ -284,8 +287,10 @@ REPLY_SCHEMA = {
                 "dispute": {"type": "string", "description": "The point's id, e.g. D1."},
                 "stance": {"type": "string", "enum": ["hold", "change", "partly"]},
                 "side": {"type": "string", "description": "The side tag you now take (one of the listed tags)."},
-                "argument": {"type": "string", "description": "Your argument. If you change, name what changed "
-                                                              "your mind."},
+                "argument": {"type": "string", "description": "50-70 words in plain language. First sentence: your "
+                                                              "position on this point. Then your strongest reason, and "
+                                                              "what would change your mind. If you change, name what "
+                                                              "changed it."},
                 "evidence": _STRS,
             },
             "required": ["dispute", "stance", "side", "argument", "evidence"], "additionalProperties": False}},
@@ -337,7 +342,10 @@ def deliberation_round(run: dict[str, Any], seat: dict[str, Any], answers: list[
         "evidence and reasoning and cite evidence by number where you can. To change position you must name "
         "the argument or evidence that changed your mind; 'the majority agrees' is not a reason, and neither is "
         "deference to another member. Holding a well-founded view against the others is valuable. Answer only "
-        "the listed points.")
+        "the listed points. Write each argument for a reader who has not seen the answers: 50-70 words, your "
+        "position in the first sentence, then your strongest reason and what would change your mind. Use short "
+        "sentences and plain words, spell out abbreviations, and refer to other members by name. Put evidence "
+        "numbers in the evidence list or at the end of a sentence, not in the middle of one.")
     body = [_context_block(run), "# Answers"]
     for a in answers:
         tag = " (your answer)" if a["name"] == seat["name"] else ""

@@ -25,7 +25,8 @@ from typing import Any, Optional
 from .config import model_label
 from .engine import usage_totals
 from . import __version__
-from .report_md import (DISCLAIMER, PRODUCT, about, delib_decided, delib_last, delib_line, exec_summary,
+from .report_md import (DISCLAIMER, PRODUCT, about, arg_parts, debate_tally, delib_decided, delib_last, delib_line,
+                        exec_summary, extra_cites,
                         stance_word)
 
 FONTS = Path(__file__).resolve().parent.parent / "assets" / "fonts"
@@ -593,12 +594,13 @@ def _deliberation(w: _W, run: dict, d: dict, chair: dict):
     w.heading("Deliberation", room=60)
     pdf.start_section("Deliberation", level=1)
     rounds = len(d["rounds"])
+    w.para("**" + " · ".join(debate_tally(d)) + "**", after=1.2)
     w.para((d.get("reason") or "") + f" The seats answered the points below in {rounds} round{'s' if rounds > 1 else ''}; "
            "each had to hold or change its position and give its reason.", size=SMALL, color=MUTED, after=3)
     decided = delib_decided(chair, d["disputes"])
     kinds = {"action": "about the action", "claim": "about a claim the decision rests on", "emphasis": "emphasis"}
     for p in d["disputes"]:
-        if pdf.will_page_break(30):
+        if pdf.will_page_break(48):
             pdf.add_page()
         still = " · still disputed" if p["id"] in (d.get("open") or []) else ""
         w.para(f"**{p['id']} · {p['point']}**", after=0.6)
@@ -607,11 +609,17 @@ def _deliberation(w: _W, run: dict, d: dict, chair: dict):
             r = delib_last(d, pos["seat"], p["id"])
             moved = f" → {r['side']}" if r and r.get("side") and r["side"] != pos["side"] else ""
             word = stance_word(r, pos["side"])
-            said = (r or {}).get("argument") or ""
-            ev = "".join(f" [{e}]" for e in (r or {}).get("evidence") or []
-                         if re.fullmatch(r"[EIW]\d+", e) and not re.search(rf"\b{e}\b", said))   # not cited twice
-            w.item("•", f"**{pos['seat']}** ({pos['side']}{moved}; {word}). {(r or {}).get('argument') or pos['view']}{ev}",
-                   after=1.4)
+            lead, *rest = arg_parts((r or {}).get("argument") or pos["view"]) or [""]
+            if pdf.will_page_break(26):
+                pdf.add_page()
+            w.item("•", f"**{pos['seat']}** · {pos['side']}{moved} · {word}", after=0.5)
+            if lead:
+                w.para(lead, indent=4.5, after=0.7)
+            for t in rest:
+                w.item("–", t, size=SMALL, indent=4.5, after=0.5, color=MUTED)
+            if extra_cites(r):
+                w.para("Evidence: " + ", ".join(extra_cites(r)), size=SMALL, color=MUTED, indent=4.5, after=0.5)
+            pdf.ln(1.4)
         x = decided.get(p["id"])
         if x:
             pdf.ln(0.6)

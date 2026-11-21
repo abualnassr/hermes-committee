@@ -2,12 +2,13 @@ manifest_version: 2
 api_version: 1
 name: hermes-committee
 label: Hermes Committee
-version: 0.4.3
+version: 0.4.4
 description: >-
   A committee of AI models for hard decisions: seats with their own roles and models answer
   independently, rank each other's anonymous answers, debate where they disagree, and a
-  chairman writes the decision with dissent and next actions. Evidence files, time and budget
-  limits, a live Desktop page, and a Markdown + PDF report. Run it with /hermes-committee:convene <question>.
+  chairman writes the decision with dissent and next actions. Evidence files (documents, photos
+  and source code), optional web research, time and budget limits, a live Desktop page, and a
+  Markdown + PDF report. Run it with /hermes-committee:convene <question>.
 author: abualnassr
 kind: standalone
 license: MIT

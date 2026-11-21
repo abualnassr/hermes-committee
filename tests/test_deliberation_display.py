@@ -69,3 +69,32 @@ def test_pdf_shows_the_call_and_the_concession(settings, tmp_path):
     text = " ".join(p.get_text() for p in doc).replace("\n", " ")
     assert "Chairman's call: Accept reported restart readiness." in text
     assert "conceded a point" in text
+
+
+# ── reading layout: lead line, the rest one per line, a one-line tally ─────────────────────────────────
+
+def test_argument_splits_into_a_lead_and_the_rest():
+    parts = report_md.arg_parts("Keep the pump. It has run 9,000 h [E2]. “Swap” costs more. e.g. not a split")
+    assert parts == ["Keep the pump.", "It has run 9,000 h [E2].", "“Swap” costs more. e.g. not a split"]
+    assert report_md.arg_parts("") == [] and report_md.arg_parts(None) == []
+
+
+def test_tally_counts_seats_not_moves_and_what_is_open():
+    d = {"disputes": [{"id": "D1"}, {"id": "D2"}], "rounds": [{}, {}], "open": ["D2"],
+         "moves": [{"seat": "A", "from": "x", "to": "y"}, {"seat": "A", "from": "p", "to": "q"},
+                   {"seat": "B", "from": "x", "to": "x", "kept_side": True}]}
+    assert report_md.debate_tally(d) == ["2 points debated", "2 rounds", "1 seat changed side", "1 conceded a point",
+                                         "1 still disputed"]
+    assert report_md.debate_tally({"disputes": [{}], "rounds": [{}]}) == ["1 point debated", "nobody moved", "all settled"]
+
+
+def test_markdown_debate_reads_in_steps(settings):
+    run = _run(settings)
+    rep = run["deliberation"]["rounds"][0]["replies"]["Charlie"]["responses"][0]
+    rep.update(argument="I concede the files contain no repeat sample. The trend still points up [E1].",
+               evidence=["E1", "E2"])
+    md = report_md.render(run)
+    assert "**1 point debated · 1 conceded a point · 1 still disputed**" in md
+    assert "- **Charlie** · " in md and "  I concede the files contain no repeat sample." in md
+    assert "  - The trend still points up [E1]." in md
+    assert "  - Evidence: E2" in md                                   # E1 is already cited in the text

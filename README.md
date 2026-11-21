@@ -66,6 +66,8 @@ what matters:
 | Format | How the seats get it |
 |---|---|
 | Text, Markdown, CSV, JSON | as written |
+| Source code (.js, .ts, .py, .java, .cs, .go, .css, .sql and about 60 more) | with numbered lines, so the seats cite file and line (`[E2] main.js:120`) |
+| Any other text file (config files, scripts without an extension) | as written; binary files (programs, archives, video) are refused |
 | PDF | the text of each page; a **scanned** page is read as a picture |
 | Word (.docx) | text, headings, lists and tables (pictures inside it are left out; add them as photos) |
 | Excel (.xlsx) | each sheet as a table, up to 2,000 rows; formulas as their last saved values |
@@ -73,7 +75,9 @@ what matters:
 
 Up to 25 MB per file, 60 files and 40 pictures per committee. Old `.doc`/`.xls` files: save
 them as `.docx`/`.xlsx` first. Files are read **once**, when you add them. Each row shows the
-size and approximate tokens; untick a file to leave it out. The seats cite the evidence as
+size and approximate tokens; untick a file to leave it out. When the files add up to more than
+about 40,000 tokens per call, the page names the biggest ones so you can leave out what the question
+does not need (**📁 Choose folder** skips `node_modules`, build output and minified files). The seats cite the evidence as
 **[E1], [E2]…** (text) and **[I1], [I2]…** (pictures).
 
 **Photos.** A model in the committee first writes a factual description of each photo (one extra
@@ -104,15 +108,23 @@ easier to see than to describe; for numbers, a table or text export is cheaper a
 than a screenshot.
 
 **🌐 Research first** (a switch under the evidence, off by default). Before the seats start, Hermes
-turns your question into a few web searches, reads the top pages and keeps up to 8 short passages
-that bear on the question, each with its source. The plugin splits each page into numbered passages
+turns your question into a few web searches. For a choice between options it first looks for which
+options are current and how they compare, then runs a second, targeted search for those options'
+official pages, requirements, licences and benchmarks. It reads up to 8 pages, official sources first,
+and keeps up to 8 short passages that bear on the question, each with its source. The plugin splits each page into numbered passages
 and the model picks them by number, so every passage is word for word from its page, never repeated,
 and at most 2 come from one site. **Time allowed** (45 s, 1½ min by default, or 2½ min) caps how
-long the research may take; after that the committee goes on with what it found. Every seat gets the same passages as evidence, cited as
+long the research may take; after that the committee goes on with what it found. **4 min · Thorough**
+also widens the search: up to 6 + 6 searches, 14 pages and 16 passages (about 4,600 tokens per seat
+instead of 2,300). *When to use it:* a choice where missing one option would matter, such as the
+current best models or products; two standard runs of one question can find different pages. Every seat gets the same passages as evidence, cited as
 **[W1], [W2]…** and marked *unverified*; the seats themselves still have no tools. On a run from the
 page, the run then pauses up to 30 s with the sources listed, all ticked: untick any you do not
-trust and press **Continue** (paused time does not count). It uses the web search you set up in
-Hermes, costs 2 calls on the chairman's model, and adds about 2,300 tokens to each seat's input.
+trust and press **Continue** (paused time does not count). If a source you know of is missing,
+paste its link or type one more search in the box under the list: the run reads it, adds what bears
+on the question (marked *added by you*) and restarts the 30 s wait. Up to 3 additions per run, one
+chairman call each. It uses the web search you set up in
+Hermes, costs 3 calls on the chairman's model, and adds about 2,300 tokens to each seat's input.
 Only your question goes to the search provider, never your files. The sources are listed on the
 Decision page (**Web sources** tab) and in the report.
 *When to use it:* questions that depend on current facts, prices, standards or recent events.
@@ -129,6 +141,7 @@ Choose a **committee type** from the chips under the question:
 | **Decision Board** | Strategist, Risk Officer, Operator, Finance | Choosing between options |
 | **Red Team** | Pre-mortem, Assumption Auditor, Adversary, Edge-case Hunter | Stress-testing a plan or claim |
 | **Reliability Board** | Mechanical Eng., Reliability Eng., Operations & Cost, HSE & Compliance, Red Team | Asset and maintenance decisions |
+| **Engineering Review** | Security Reviewer, Performance Engineer, Maintainer, Devil's Advocate | Design docs, architecture and library choices, refactors, code files (the seats read the files; they cannot run code) |
 
 Then **click any seat** to edit it in the panel on the right:
 
@@ -264,7 +277,8 @@ dissent, debate, time, cost and calls.
   models, instructions, time limit and budget, with a new blind vote and a new verdict. The seats get
   the earlier question, verdict and dissent as background (untick to start fresh), and the same
   evidence; picture descriptions are reused, so photos are not paid for twice. You can add new or
-  missed files in the dialog. *When to use it:* a new fact, new evidence, a changed constraint or a
+  missed files in the dialog. **Research first** is off for a follow-up unless you tick it there: the
+  earlier web sources are not reused. *When to use it:* a new fact, new evidence, a changed constraint or a
   "what if" that needs the committee's judgement.
 - **💬 Discuss in chat** opens the chat the committee ran in. One model answers there, not the
   committee. *When to use it:* to have the verdict explained, reworded or turned into a plan, at no
@@ -383,7 +397,7 @@ files, use the Committee page, where you can see each file's size and the cost b
 ## Cost, privacy and risk (please read)
 
 - **One run makes about 2 × seats + 1 model calls**: the seats answer, the seats vote, the chairman
-  decides. Research first adds 2, each photo or scanned page adds 1 (its description), and a debate
+  decides. Research first adds 3, each photo or scanned page adds 1 (its description), and a debate
   adds 1 + seats × rounds. The page shows the count before you press Convene. Reasoning models can use many
   tokens. Token counts are recorded for every call, with an **estimated cost** (tokens × list
   price) and a cost table by stage in the report. Your provider's bill is the real figure:

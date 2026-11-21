@@ -22,16 +22,29 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 MAX_QUERIES = 4
+MAX_FOLLOW = 4                   # second-pass queries, aimed at the options the first pass named
 RESULTS_PER_QUERY = 5
-MAX_PAGES = 6
+MAX_PAGES = 8
+FOLLOW_MIN_S = 30                # second pass only when this much reading time is left
 PAGE_CHARS = 9000                # read per page (about 2,300 tokens)
 MAX_ITEMS = 8
 MAX_PER_SITE = 2                 # so one site (or one page) cannot fill the evidence
 ITEM_CHARS = 900                 # one passage
 TOTAL_CHARS = 9000               # all passages (about 2,300 tokens on every seat)
-WINDOW_MAX_S = 150               # the whole research step, at most
-CAP_CHOICES = (45, 90, 150)      # the time the user allows research (Research first · time allowed)
+WINDOW_MAX_S = 240               # the whole research step, at most
+CAP_CHOICES = (45, 90, 150, 240)  # the time the user allows research (Research first · time allowed)
 CAP_DEFAULT = 90
+THOROUGH_S = 240                 # the longest choice is "Thorough": more searches, pages and passages
+# (queries, second-pass queries, pages read, passages kept, characters kept, max tokens for the pick)
+DEPTH = {"standard": (MAX_QUERIES, MAX_FOLLOW, MAX_PAGES, MAX_ITEMS, TOTAL_CHARS, 900),
+         "thorough": (6, 6, 14, 16, 18000, 1500)}
+
+
+def depth(run: dict[str, Any]) -> dict[str, Any]:
+    """How much this run's research may search, read and keep: 'thorough' when the user allowed the longest time."""
+    name = "thorough" if cap_of(run.get("research_secs")) >= THOROUGH_S else "standard"
+    q, f, p, i, c, t = DEPTH[name]
+    return {"name": name, "queries": q, "follow": f, "pages": p, "items": i, "chars": c, "pick_tokens": t}
 
 
 def cap_of(v) -> int:
@@ -52,15 +65,33 @@ PICK_RESERVE_S = 25               # of the research time, kept for picking passa
 GRACE_S = 30                     # extra wait when only the last step (picking passages) is still running
 REVIEW_WAIT_S = 30
 QUERIES_MAX_TOKENS = 500
+FOLLOW_MAX_TOKENS = 600
 EXCERPTS_MAX_TOKENS = 900       # numbers and one line each; the plugin copies the text
+EST_FOLLOW_IN = 2500            # the first pass's results (titles and snippets)
+# Hosts that usually carry primary facts: preferred when the model does not choose the pages itself.
+PRIMARY_HOSTS = ("github.com", "huggingface.co", "arxiv.org", "wikipedia.org", "readthedocs.io")
 # for estimates before anything ran (pricing)
 EST_QUERY_IN, EST_EXCERPT_IN, EST_WEB_TOKENS = 700, MAX_PAGES * PAGE_CHARS // 4 + 900, TOTAL_CHARS // 4
 
 QUERY_SCHEMA = {
     "type": "object",
     "properties": {"queries": {"type": "array", "items": {"type": "string"},
-                               "description": f"2 to {MAX_QUERIES} short web search queries."}},
+                               "description": "Short web search queries (the instructions say how many)."}},
     "required": ["queries"], "additionalProperties": False,
+}
+
+FOLLOW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "options": {"type": "array", "items": {"type": "string"},
+                    "description": "The named options the results show the committee should compare (empty when "
+                                   "the question is not a choice between options)."},
+        "queries": {"type": "array", "items": {"type": "string"},
+                    "description": "Short queries for primary facts about those options (the instructions say how many)."},
+        "read": {"type": "array", "items": {"type": "integer"},
+                 "description": "Result numbers worth reading, best first."},
+    },
+    "required": ["options", "queries", "read"], "additionalProperties": False,
 }
 
 EXCERPT_SCHEMA = {
@@ -82,13 +113,22 @@ def wanted(run: dict[str, Any]) -> bool:
     return bool(run.get("research")) and run.get("web") is None
 
 
+def _today() -> str:
+    return time.strftime("%B %Y")
+
+
 def _queries_prompt(run: dict[str, Any]) -> tuple[str, str]:
     files = [f.get("name") for f in run.get("files") or [] if f.get("name")]
-    instr = ("You prepare a web search for a committee. Write 2 to 4 short search queries (3 to 8 words each) "
-             "that would find current, citable facts the committee needs: standards, limits, prices, recent "
-             "events, typical values. Do not search for the answer itself or for opinions. Use the question's "
-             "language. Never include personal names, internal identifiers or confidential details: write the "
-             "queries in general terms.")
+    instr = (f"You prepare a web search for a committee. Today is {_today()}. Write 2 to {depth(run)['queries']} short "
+             "search queries (3 to 8 words each) that find the current, citable facts the committee needs to "
+             "decide. If the question asks which option is best or what to choose, the most important facts are "
+             "which options exist now and how they compare: spend at least one query on the current options "
+             f"(for example 'best open-weight <kind of thing> {_today()}') and one on a comparison, benchmark or "
+             "leaderboard. Your own knowledge of the options may be out of date, so search for what is current "
+             "rather than only the names you know. Otherwise search for standards, limits, prices, typical "
+             "values and recent events. Do not search for facts the question already states (for example the "
+             "user's own equipment or figures). Use the question's language. Never include personal names, "
+             "internal identifiers or confidential details: write the queries in general terms.")
     text = f"# Question\n{run['question'].strip()}"
     if files:
         text += "\n\n# The user's evidence files (names only; their contents are not searchable)\n" + \
@@ -121,13 +161,34 @@ def _paragraphs(content: str) -> list[str]:
     return out
 
 
-def _excerpts_prompt(run: dict[str, Any], pages: list[dict[str, Any]]) -> tuple[str, str]:
-    instr = (f"You pick evidence for a committee from web pages. Each page is split into numbered passages "
-             f"like [2.7] (page 2, passage 7). Choose up to {MAX_ITEMS} passages that bear directly on the "
-             "question: facts, figures, limits, definitions, dates. Answer with the page and passage numbers "
-             f"only; do not copy text. Take at most {MAX_PER_SITE} passages from any one page and spread your "
-             "picks across the pages that have something relevant. Skip adverts, menus and opinion without "
-             f"facts. Prefer primary and authoritative sources. {UNTRUSTED}")
+def _follow_prompt(run: dict[str, Any], hits: list[dict[str, str]]) -> tuple[str, str]:
+    L = depth(run)
+    instr = (f"You plan the second step of a web search for a committee. Today is {_today()}. Below are the "
+             "numbered results of the first searches (title, site, snippet). (1) If the question is a choice "
+             "between options, list the options these results show are current and serious contenders, "
+             "including any you did not know. (2) Write up to "
+             f"{L['follow']} short queries that find primary facts about those options: their official page, "
+             "model card or documentation, requirements, licence or terms, and independent benchmarks. Write no "
+             "queries when the first results already cover the question. (3) Choose up to "
+             f"{L['pages']} result numbers worth reading, best first: official pages, documentation, standards, "
+             "leaderboards and independent comparisons before vendor marketing, listicles and forums. Skip "
+             "results about facts the question already states. Never include personal names, internal "
+             f"identifiers or confidential details in queries. {UNTRUSTED}")
+    lines = [f"[{i}] {h['title']} · {_site(h['url'])}" + (f"\n    {h['snippet']}" if h.get("snippet") else "")
+             for i, h in enumerate(hits, 1)]
+    return instr, f"# Question\n{run['question'].strip()}\n\n# First results\n" + "\n".join(lines)
+
+
+def _excerpts_prompt(run: dict[str, Any], pages: list[dict[str, Any]], n: Optional[int] = None) -> tuple[str, str]:
+    instr = (f"You pick evidence for a committee from web pages. Today is {_today()}. Each page is split into "
+             f"numbered passages like [2.7] (page 2, passage 7). Choose up to {n or depth(run)['items']} passages that bear "
+             "directly on the decision. Most valuable: which options exist now, how they compare (benchmarks, "
+             "measured results, side-by-side tables), their requirements, licences or terms, limits and dates. "
+             "Skip passages that only repeat what the question already states (for example the user's own "
+             "equipment), generic marketing, adverts, menus and opinion without facts. Prefer primary and "
+             "independent sources over sellers. Answer with the page and passage numbers only; do not copy "
+             f"text. Take at most {MAX_PER_SITE} passages from any one page and spread your picks across the "
+             f"pages that have something relevant. {UNTRUSTED}")
     body = [f"# Question\n{run['question'].strip()}"]
     for i, p in enumerate(pages, 1):
         lines = "\n".join(f"[{i}.{k}] {para}" for k, para in enumerate(p["paras"], 1))
@@ -192,6 +253,9 @@ def gather(run: dict[str, Any], llm: Any, call: Callable[..., tuple], slot: dict
 
 
 def _gather(run, llm, call, slot, step, stop, web: dict[str, Any]) -> dict[str, Any]:
+    L = depth(run)
+    if L["name"] == "thorough":
+        web["depth"] = "thorough"
     search, extract = getattr(llm, "web_search", None), getattr(llm, "web_extract", None)
     if not callable(search) or not callable(extract):
         web["note"] = "Web search is not available here, so the committee worked from your evidence only."
@@ -205,47 +269,56 @@ def _gather(run, llm, call, slot, step, stop, web: dict[str, Any]) -> dict[str, 
     qs = (parsed or {}).get("queries") if isinstance(parsed, dict) else None
     if not isinstance(qs, list):
         qs = [ln.strip("-*• \t\"") for ln in (raw or "").splitlines() if ln.strip()]
-    qs = list(dict.fromkeys(str(q).strip()[:120] for q in qs if str(q).strip()))[:MAX_QUERIES]
+    qs = list(dict.fromkeys(str(q).strip()[:120] for q in qs if str(q).strip()))[:L["queries"]]
     if not qs:
         web["note"] = "No searches could be written for this question."
         return web
     web["queries"] = qs
 
     web["phase"] = "searching"
-    hits: list[dict[str, str]] = []
     seen: set[str] = set()
-    errors = []
+    errors: list[str] = []
     step(f"searching · {len(qs)} searches at once")
-    # Each worker runs in a copy of this thread's context: Hermes binds the profile's keys to the context
-    # (a ContextVar), and pool threads do not inherit it. Without the copy, a multi-profile gateway refuses
-    # every key read in the workers ("could not read this profile's ..._API_KEY"). One copy per task:
-    # a Context cannot be entered by two threads at once.
-    with ThreadPoolExecutor(max_workers=len(qs)) as pool:
-        futs = [pool.submit(contextvars.copy_context().run,
-                            lambda q: None if stop.is_set() else _parse(search(q, RESULTS_PER_QUERY)), q) for q in qs]
-        found = [f.result() for f in futs]
-    for d in found:
-        if d is None:
-            continue
-        if _error_of(d):
-            errors.append(_error_of(d))
-            continue
-        web["searched"] += 1
-        for r in ((d.get("data") or {}).get("web") or [])[:RESULTS_PER_QUERY]:
-            url = str(r.get("url") or "").strip()
-            if url.startswith(("http://", "https://")) and url not in seen:
-                seen.add(url)
-                hits.append({"url": url, "title": str(r.get("title") or url)[:160]})
+    hits = _search_all(search, qs, stop, seen, errors, web)
     if not hits:
         web["note"] = ("The web search failed: " + errors[0]) if errors else "The web search found nothing."
         return web
 
-    # One page per site first, so a single site cannot fill the evidence.
-    by_site: dict[str, list] = {}
-    for hit in hits:
-        by_site.setdefault(_site(hit["url"]), []).append(hit)
-    order = [v[0] for v in by_site.values()] + [h for v in by_site.values() for h in v[1:]]
-    picked = order[:MAX_PAGES]
+    # Second pass: one call names the current options in the first results, writes queries for their primary
+    # facts, and picks which first results are worth reading. Skipped (and the first results read in order)
+    # when the call fails or the reading time is short.
+    chosen: list[dict[str, str]] = []
+    targeted: list[dict[str, str]] = []
+    read_by = float(web.get("read_by") or 0) or time.time() + 3600
+    if not stop.is_set() and read_by - time.time() > FOLLOW_MIN_S:
+        web["phase"] = "planning"
+        step("finding the current options")
+        instr, text = _follow_prompt(run, hits)
+        try:
+            parsed, _raw, _fb = call("research", "Chairman", slot, instr, text, FOLLOW_SCHEMA, "committee_followup",
+                                     max_tokens=FOLLOW_MAX_TOKENS)
+        except Exception:  # noqa: BLE001 - the second pass is optional
+            parsed = None
+        plan = parsed if isinstance(parsed, dict) else {}
+        plan = {k: plan.get(k) if isinstance(plan.get(k), list) else [] for k in ("options", "queries", "read")}
+        opts = [str(o).strip()[:80] for o in plan["options"] if str(o).strip()][:8]
+        if opts:
+            web["options"] = opts
+        for n in plan["read"]:
+            try:
+                h = hits[int(n) - 1]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if h not in chosen:
+                chosen.append(h)
+        more = [q for q in dict.fromkeys(str(q).strip()[:120] for q in plan["queries"] if str(q).strip())
+                if q not in qs][:L["follow"]]
+        if more and not stop.is_set() and read_by - time.time() > FOLLOW_MIN_S:
+            web["queries"] = qs + more
+            web["phase"] = "searching"
+            step(f"searching the options · {len(more)} searches")
+            targeted = _search_all(search, more, stop, seen, errors, web, first_only=True)
+    picked = _pick_pages(hits, chosen, targeted, L["pages"])
     web["phase"] = "reading"
     step(f"reading {len(picked)} pages")
     # One page per call, all at once; keep what has arrived by the reading deadline (slow sites are dropped).
@@ -293,8 +366,22 @@ def _gather(run, llm, call, slot, step, stop, web: dict[str, Any]) -> dict[str, 
     step("picking the passages")
     instr, text = _excerpts_prompt(run, pages)
     parsed, _raw, _fb = call("research", "Chairman", slot, instr, text, EXCERPT_SCHEMA, "committee_excerpts",
-                             max_tokens=EXCERPTS_MAX_TOKENS)
-    items, total = [], 0
+                             max_tokens=L["pick_tokens"])
+    items: list[dict[str, Any]] = []
+    _take(parsed, pages, items, L["items"], L["chars"])
+    web["items"] = items
+    web["status"] = "ok" if items else "empty"
+    if not items:
+        web["note"] = "The pages read had nothing the committee could use."
+    return web
+
+
+def _take(parsed: Any, pages: list[dict[str, Any]], items: list[dict[str, Any]], limit: int, chars: int,
+          added: str = "") -> int:
+    # A source the user adds is theirs to judge: no per-site limit (the site may already have two passages).
+    """Append the passages the model picked (by page and paragraph number) to ``items``; returns how many."""
+    total = sum(len(i["excerpt"]) for i in items)
+    start = len(items)
     for x in (parsed or {}).get("excerpts") or [] if isinstance(parsed, dict) else []:
         try:
             p = pages[int(x.get("page")) - 1]
@@ -308,19 +395,135 @@ def _gather(run, llm, call, slot, step, stop, web: dict[str, Any]) -> dict[str, 
             quote = " ".join(str(x.get("quote") or "").split())[:ITEM_CHARS]
             if not _found(quote, p["content"]):
                 continue
-        if any(i["excerpt"] == quote for i in items) or total + len(quote) > TOTAL_CHARS \
-                or sum(i["site"] == p["site"] for i in items) >= MAX_PER_SITE:
+        if any(i["excerpt"] == quote for i in items) or total + len(quote) > chars \
+                or (not added and sum(i["site"] == p["site"] for i in items) >= MAX_PER_SITE):
             continue
         total += len(quote)
         items.append({"id": f"W{len(items) + 1}", "url": p["url"], "title": p["title"], "site": p["site"],
-                      "excerpt": quote, "why": " ".join(str(x.get("why") or "").split())[:200], "keep": True})
-        if len(items) >= MAX_ITEMS:
+                      "excerpt": quote, "why": " ".join(str(x.get("why") or "").split())[:200], "keep": True,
+                      **({"added": added} if added else {})})
+        if len(items) >= limit:
             break
-    web["items"] = items
-    web["status"] = "ok" if items else "empty"
-    if not items:
-        web["note"] = "The pages read had nothing the committee could use."
-    return web
+    return len(items) - start
+
+
+MORE_MAX = 3                     # links or searches the user may add during one source review
+MORE_PAGES = 3                   # pages read for an added search
+MORE_READ_S = 25
+HOLD_S = 180                     # the user asked for time to find a link: the review waits this long
+
+
+def add_more(run: dict[str, Any], llm: Any, call: Callable[..., tuple], slot: dict[str, Any],
+             req: dict[str, Any]) -> str:
+    """During the source review: read one link the user pasted, or run one search the user typed, and add
+    what bears on the question (picked by number, like the rest). Returns a short note for the page."""
+    web = run["web"]
+    items = web.setdefault("items", [])
+    search, extract = getattr(llm, "web_search", None), getattr(llm, "web_extract", None)
+    if not callable(extract):
+        return "Web reading is not available here."
+    url = str(req.get("url") or "").strip()
+    query = " ".join(str(req.get("query") or "").split())[:200]
+    have = {i["url"] for i in items}
+    if url:
+        if not url.startswith(("http://", "https://")) or len(url) > 500:
+            return "That is not a web link (it must start with http:// or https://)."
+        urls, what = [url], _site(url)
+    elif query:
+        if not callable(search):
+            return "Web search is not available here."
+        d = _parse(search(query, RESULTS_PER_QUERY))
+        if _error_of(d):
+            return "The search failed: " + _error_of(d)
+        web["searched"] = int(web.get("searched") or 0) + 1
+        web.setdefault("queries", []).append(query)
+        urls = [u for u in (str(r.get("url") or "").strip() for r in ((d.get("data") or {}).get("web") or []))
+                if u.startswith(("http://", "https://")) and u not in have][:MORE_PAGES]
+        what = f"the search “{query}”"
+        if not urls:
+            return f"The search “{query}” found no new pages."
+    else:
+        return "Paste a link or type a search."
+    pages: list[dict[str, Any]] = []
+    pool = ThreadPoolExecutor(max_workers=len(urls))
+    futs = {pool.submit(contextvars.copy_context().run, lambda u: _parse(extract([u])), u): u for u in urls}
+    try:
+        for f in as_completed(futs, timeout=MORE_READ_S):
+            try:
+                res = (f.result().get("results") or [None])[0]
+            except Exception:  # noqa: BLE001 - one bad page is skipped
+                continue
+            content = str((res or {}).get("content") or "").strip()
+            if content and not (res or {}).get("error"):
+                u = futs[f]
+                pages.append({"url": u, "title": str(res.get("title") or u)[:160], "site": _site(u),
+                              "content": content[:PAGE_CHARS], "paras": _paragraphs(content[:PAGE_CHARS])})
+    except FutureTimeout:
+        pass
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    if not pages:
+        return f"Could not read {what}."
+    web["read"] = int(web.get("read") or 0) + len(pages)
+    L = depth(run)
+    n = 2 if url else 4
+    instr, text = _excerpts_prompt(run, pages, n)
+    parsed, _raw, _fb = call("research", "Chairman", slot, instr, text, EXCERPT_SCHEMA, "committee_excerpts",
+                             max_tokens=EXCERPTS_MAX_TOKENS)
+    total = sum(len(i["excerpt"]) for i in items)
+    got = _take(parsed, pages, items, len(items) + n, total + n * ITEM_CHARS, added="you")
+    picked = len((parsed or {}).get("excerpts") or []) if isinstance(parsed, dict) else 0
+    if got:
+        return f"Added {got} passage{'s' if got != 1 else ''} from {what}."
+    return (f"The passages picked from {what} are already in the sources." if picked
+            else f"Nothing in {what} bears on the question.")
+
+
+def _search_all(search, qs: list[str], stop: threading.Event, seen: set[str], errors: list[str],
+                web: dict[str, Any], first_only: bool = False) -> list[dict[str, str]]:
+    """Run the searches at once; new results as {url, title, snippet}. ``first_only`` keeps the top two
+    results of each search (the targeted second pass), so each option gets its own pages."""
+    # Each worker runs in a copy of this thread's context: Hermes binds the profile's keys to the context
+    # (a ContextVar), and pool threads do not inherit it. Without the copy, a multi-profile gateway refuses
+    # every key read in the workers ("could not read this profile's ..._API_KEY"). One copy per task:
+    # a Context cannot be entered by two threads at once.
+    with ThreadPoolExecutor(max_workers=max(1, len(qs))) as pool:
+        futs = [pool.submit(contextvars.copy_context().run,
+                            lambda q: None if stop.is_set() else _parse(search(q, RESULTS_PER_QUERY)), q) for q in qs]
+        found = [f.result() for f in futs]
+    hits: list[dict[str, str]] = []
+    for d in found:
+        if d is None:
+            continue
+        if _error_of(d):
+            errors.append(_error_of(d))
+            continue
+        web["searched"] += 1
+        for r in ((d.get("data") or {}).get("web") or [])[:2 if first_only else RESULTS_PER_QUERY]:
+            url = str(r.get("url") or "").strip()
+            if url.startswith(("http://", "https://")) and url not in seen:
+                seen.add(url)
+                hits.append({"url": url, "title": str(r.get("title") or url)[:160],
+                             "snippet": " ".join(str(r.get("description") or "").split())[:240]})
+    return hits
+
+
+def _primary(url: str) -> bool:
+    host = _site(url)
+    return any(host == p or host.endswith("." + p) for p in PRIMARY_HOSTS) or host.endswith((".gov", ".edu"))
+
+
+def _pick_pages(hits: list[dict[str, str]], chosen: list[dict[str, str]],
+                targeted: list[dict[str, str]], limit: int = MAX_PAGES) -> list[dict[str, str]]:
+    """The pages to read: the targeted second-pass results and the model's picks first, then the rest with
+    primary hosts ahead; one page per site before any second page, so one site cannot fill the evidence."""
+    rest = [h for h in hits if h not in chosen]
+    rest.sort(key=lambda h: not _primary(h["url"]))           # stable: search order kept within each group
+    by_site: dict[str, list] = {}
+    for hit in targeted + chosen + rest:
+        by_site.setdefault(_site(hit["url"]), []).append(hit)
+    order = [v[0] for v in by_site.values()] + [h for v in by_site.values() for h in v[1:]]
+    return order[:limit]
 
 
 def renumber(web: dict[str, Any]) -> None:
@@ -351,5 +554,5 @@ def tokens(run: dict[str, Any]) -> int:
     """Tokens the passages add to every seat's input (an estimate before research has run)."""
     web = run.get("web")
     if web is None:
-        return EST_WEB_TOKENS if run.get("research") else 0
+        return (depth(run)["chars"] // 4) if run.get("research") else 0
     return sum(len(x.get("excerpt", "")) + len(x.get("title", "")) + 60 for x in web.get("items") or []) // 4

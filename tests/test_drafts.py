@@ -144,7 +144,7 @@ def test_research_switch_survives_page_to_draft_to_run(monkeypatch, tmp_path, se
     r = _post(api, {"question": "Best free model for HTML games?", "template": "classic", "review": False,
                     "research": on, "seats": SEATS, "chairman": CHAIR})
     assert r["ok"] is True and store.load_draft(tmp_path, r["draft"])["research"] is on
-    assert r["planned_calls"]["research"] == (2 if on else 0)
+    assert r["planned_calls"]["research"] == (3 if on else 0)
     mod, _ctx = plugin
     out = json.loads(mod.handle_open({"draft": r["draft"]}, session_id="s1"))
     assert out["ok"] is True and out["research"] is on

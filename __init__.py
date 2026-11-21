@@ -233,7 +233,7 @@ OPEN_SCHEMA = {
                       "the brief goes to every seat's provider. Ignored when `draft` is given."},
             "evidence": {"type": "string", "description": "Evidence pack (facts, data, excerpts with sources) every seat must use."},
             "preset": {"type": "string", "description": "Named preset from the user's settings. Omit for the default."},
-            "template": {"type": "string", "description": "Template id: classic, expert-panel, decision-board, red-team, reliability-board."},
+            "template": {"type": "string", "description": "Template id: classic, expert-panel, decision-board, red-team, reliability-board, engineering-review."},
             "seats": {"type": "array", "description": "Custom seats when the user names the roles. Models come from the preset by position.",
                       "items": {"type": "object", "properties": {
                           "name": {"type": "string"}, "instructions": {"type": "string"},
@@ -247,8 +247,10 @@ OPEN_SCHEMA = {
                          "and add short passages with their sources to the evidence, shared by every seat. Use it "
                          "when the question depends on current facts, prices, standards or recent events. Only the "
                          "question is sent to the search provider, never the files. Default false."},
-            "research_secs": {"type": "integer", "enum": [45, 90, 150], "description":
-                              "Most seconds Research first may take (not counting the source review). Default 90."},
+            "research_secs": {"type": "integer", "enum": [45, 90, 150, 240], "description":
+                              "Most seconds Research first may take (not counting the source review). Default 90. "
+                              "240 is Thorough: more searches, pages and passages; use it only when the user asks "
+                              "for thorough or deep research."},
             "deliberate": {"type": "string", "enum": ["material", "action", "always", "never"],
                            "description": "Let the members debate the points they disagree on before the chairman "
                                           "decides. material (default): when they differ on the action or on a claim "
@@ -272,7 +274,8 @@ OPEN_SCHEMA = {
             "max_minutes": {"type": "number", "description": "Time limit for the whole run in minutes (0 = no limit). Omit to use the user's default (10). Set only when the user asks."},
             "draft": {"type": "string", "description": "Draft id from the Committee page (`draft=<id>` in the user's "
                                                         "message). The draft holds the question, seats, models and "
-                                                        "evidence; pass only the id, plus brief/evidence you add."},
+                                                        "every file from the page, including files the question "
+                                                        "mentions: pass only the id, and do not look for files first."},
         },
         "required": [],
     },
@@ -325,8 +328,8 @@ def _follow_source(args: dict[str, Any]) -> Optional[dict[str, Any]]:
         args["chairman"] = {k: v for k, v in (prev.get("chairman") or {}).items() if k in ("provider", "model", "thinking")}
         if args.get("review") is None:
             args["review"] = prev.get("review")
-        if args.get("research") is None and prev.get("research"):
-            args["research"] = True
+        # Research first is not carried over: a follow-up is usually about new files or facts the user gives,
+        # and searching the web again costs time and calls. The model passes research=true when it needs it.
         if prev.get("custom_brief"):
             args.setdefault("chairman_guidance", prev.get("chairman_guidance"))
             args.setdefault("decision_focus", prev.get("decision_focus"))
@@ -738,7 +741,7 @@ def _cli_setup(sub):
     p.add_argument("--evidence-dir", default=None, help="Folder whose supported files are all used as evidence")
     p.add_argument("--lite", action="store_true", help="Skip Stage 2 (peer ranking)")
     p.add_argument("--research", action="store_true", help="Search the web once before the seats answer (Research first)")
-    p.add_argument("--research-secs", type=int, choices=[45, 90, 150], default=None, help="Most seconds the research may take (default 90)")
+    p.add_argument("--research-secs", type=int, choices=[45, 90, 150, 240], default=None, help="Most seconds the research may take (default 90; 240 = Thorough: more searches, pages and passages)")
     p.add_argument("--deliberate", choices=["material", "action", "always", "never"], default=None,
                    help="Debate disputed points before the verdict (default: material)")
     p.add_argument("--rounds", type=int, choices=[1, 2], default=None, help="Deliberation rounds (default 1)")
@@ -800,7 +803,8 @@ def _cli_run(args) -> int:
     paths = list(args.evidence_file or [])
     if args.evidence_dir:
         paths += sorted(str(p) for p in Path(args.evidence_dir).rglob("*")
-                        if p.is_file() and p.suffix.lower() in ev.SUPPORTED_EXT)
+                        if p.is_file() and (p.suffix.lower() in ev.SUPPORTED_EXT or ev.code_language(p.name))
+                        and not set(p.relative_to(args.evidence_dir).parts) & ev.SKIP_DIRS)
     req = {"question": args.question, "brief": args.brief, "evidence_paths": paths, "preset": args.preset,
            "template": args.template, "review": False if args.lite else None, "research": True if args.research else None, "research_secs": args.research_secs, "max_minutes": args.max_minutes, "max_usd": args.max_usd,
            "title": args.title, "follow_of": args.follow_of,

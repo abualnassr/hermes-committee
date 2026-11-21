@@ -131,6 +131,42 @@ def stance_word(r: Optional[dict], start_side: str) -> str:
     return STANCE_WORD.get(r.get("stance"), "no reply")
 
 
+_ARG_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9“‘\"'(\[])")
+
+
+def arg_parts(text: str) -> list[str]:
+    """A debate argument as its sentences: the first is the lead line, the rest read one per line."""
+    t = " ".join(str(text or "").split())
+    return [p for p in _ARG_SPLIT.split(t) if p] if t else []
+
+
+def extra_cites(r: Optional[dict]) -> list[str]:
+    """Evidence a reply lists but does not cite in its argument (so nothing is cited twice)."""
+    said = (r or {}).get("argument") or ""
+    return [e for e in (r or {}).get("evidence") or []
+            if re.fullmatch(r"[EIW]\d+", str(e)) and not re.search(rf"\b{e}\b", said)]
+
+
+def debate_tally(d: dict) -> list[str]:
+    """How the debate went, in short parts: points, who moved, what is still open (the page shows the same)."""
+    n = len(d.get("disputes") or [])
+    moves = d.get("moves") or []
+    changed = len({m["seat"] for m in moves if not kept_side(m)})
+    conceded = len({m["seat"] for m in moves if kept_side(m)})
+    rounds, still = len(d.get("rounds") or []), len(d.get("open") or [])
+    out = [f"{n} point{'s' if n != 1 else ''} debated"]
+    if rounds > 1:
+        out.append(f"{rounds} rounds")
+    if changed:
+        out.append(f"{changed} seat{'s' if changed != 1 else ''} changed side")
+    if conceded:
+        out.append(f"{conceded} conceded a point")
+    if not changed and not conceded:
+        out.append("nobody moved")
+    out.append(f"{still} still disputed" if still else "all settled")
+    return out
+
+
 def move_text(m: dict) -> str:
     if kept_side(m):
         return f"{m['seat']} on {m['dispute']} (round {m['round']}): kept “{m['from']}” but conceded a point. {m['because']}"
@@ -368,17 +404,24 @@ def render(run: dict[str, Any]) -> str:
     d = run.get("deliberation") or {}
     if d.get("rounds"):
         decided = delib_decided(chair, d["disputes"])
-        out.append("## Deliberation\n" + (d.get("reason") or ""))
+        out.append("## Deliberation\n**" + " · ".join(debate_tally(d)) + "**"
+                   + (f"\n\n{d['reason']}" if d.get("reason") else ""))
         for p in d["disputes"]:
-            lines = [f"### {p['id']} · {p['point']}", f"_{'About the action' if p['level'] == 'action' else 'About a claim the decision rests on' if p['level'] == 'claim' else 'Emphasis'}_"]
+            kind = ('About the action' if p['level'] == 'action' else 'About a claim the decision rests on'
+                    if p['level'] == 'claim' else 'Emphasis')
+            still = " · still disputed" if p["id"] in (d.get("open") or []) else ""
+            lines = [f"### {p['id']} · {p['point']}", f"_{kind}{still}_", ""]
             for pos in p["positions"]:
                 r = delib_last(d, pos["seat"], p["id"])
                 moved = f" → {r['side']}" if r and r.get("side") and r["side"] != pos["side"] else ""
                 word = stance_word(r, pos["side"])
-                extra = [x for x in (r or {}).get("evidence") or []
-                         if not re.search(rf"\b{re.escape(x)}\b", (r or {}).get("argument") or "")]
-                ev = f" [{', '.join(extra)}]" if extra else ""
-                lines.append(f"- **{pos['seat']}** ({pos['side']}{moved}, {word}): {(r or {}).get('argument') or pos['view']}{ev}")
+                lead, *rest = arg_parts((r or {}).get("argument") or pos["view"]) or [""]
+                lines.append(f"- **{pos['seat']}** · {pos['side']}{moved} · _{word}_")
+                if lead:
+                    lines.append(f"  {lead}")
+                lines.extend(f"  - {t}" for t in rest)
+                if extra_cites(r):
+                    lines.append(f"  - Evidence: {', '.join(extra_cites(r))}")
             x = decided.get(p["id"])
             if x:
                 lines.append(f"\n**Chairman's call:** {x['decided']}" + (f" Decided by: {x['by_argument']}" if x.get("by_argument") else ""))

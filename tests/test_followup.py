@@ -58,6 +58,17 @@ def test_follow_up_without_background(plugin, tmp_path):
     assert "Swap to GB-8" not in store.load(tmp_path, out["run_id"])["brief"]
 
 
+def test_follow_up_does_not_carry_research_first(plugin, tmp_path):
+    mod, _ctx = plugin
+    first = _first_run(mod, tmp_path, research=True)
+    assert first["research"] is True
+    out = json.loads(mod.handle_open({"question": "GB-8 vibrates too?", "follow_of": first["id"]}, session_id="s1"))
+    assert not store.load(tmp_path, out["run_id"])["research"]
+    out = json.loads(mod.handle_open({"question": "And the new standard?", "follow_of": first["id"], "research": True},
+                                     session_id="s1"))
+    assert store.load(tmp_path, out["run_id"])["research"] is True
+
+
 def test_follow_up_of_a_missing_run_is_refused(plugin):
     mod, _ctx = plugin
     out = json.loads(mod.handle_open({"question": "q?", "follow_of": "20990101-000000-ffffff"}, session_id="s1"))

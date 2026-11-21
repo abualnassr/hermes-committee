@@ -180,6 +180,35 @@ async def keep_sources(run_id: str, body: dict):
     return {"ok": True}
 
 
+@router.post("/runs/{run_id}/sources/more")
+async def more_sources(run_id: str, body: dict):
+    """During the source review: {url} reads one link, {query} runs one more search; what bears on the
+    question is added to the sources and the review clock restarts."""
+    import uuid
+    store, _i, _t, _c = _mods()
+    base = _base()
+    try:
+        run = store.load(base, run_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if run is None:
+        raise HTTPException(404, f"No run {run_id}")
+    if not ((run.get("live") or {}).get("sources")):
+        return {"ok": False, "note": "The run is not waiting for a source review."}
+    if (body or {}).get("hold"):
+        store.add_request(base, run_id, {"id": uuid.uuid4().hex[:12], "kind": "hold", "t": time.time()})
+        return {"ok": True}
+    url = str((body or {}).get("url") or "").strip()
+    query = " ".join(str((body or {}).get("query") or "").split())
+    if url and (not url.startswith(("http://", "https://")) or len(url) > 500):
+        raise HTTPException(400, "url must be a web link starting with http:// or https://")
+    if not url and not 3 <= len(query) <= 200:
+        raise HTTPException(400, "Give a url, or a query of 3 to 200 characters")
+    req = {"id": uuid.uuid4().hex[:12], "kind": "more", "t": time.time(), **({"url": url} if url else {"query": query})}
+    store.add_request(base, run_id, req)
+    return {"ok": True}
+
+
 @router.post("/runs/{run_id}/stop")
 async def stop(run_id: str):
     """Stop a live run from the page. A run that nobody is advancing any more (its chat turn
@@ -306,7 +335,8 @@ async def create_draft(body: dict):
     did = store.save_draft(_base(), {**body, "question": question})
     return {"ok": True, "draft": did, "planned_calls": cfgmod.planned_calls(roster), "warnings": roster["warnings"],
             "max_secs": roster["limits"]["max_secs"], "evidence": ev_check, "estimate": est,
-            "message": f"/hermes-committee:convene draft={did} {' '.join(question.split())[:240]}"}
+            "message": (f"/hermes-committee:convene draft={did} (the draft already holds the question, seats and "
+                        f"every file; open it now) {' '.join(question.split())[:150]}")}
 
 
 @router.get("/standings")

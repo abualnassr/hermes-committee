@@ -79,6 +79,35 @@ TEMPLATES: dict[str, dict[str, Any]] = {
                               "consequence of being wrong, and the next actions with owners where possible."),
         "decision_focus": True,
     },
+    "engineering-review": {
+        "title": "Engineering Review",
+        "description": ("Software design and code decisions: review a design doc, an architecture choice, a "
+                        "refactor or code files from security, performance, maintainability and contrarian views."),
+        "seats": [
+            {"name": "Security Reviewer", "instructions": (
+                "Review for security: trust boundaries, input handling, authentication and authorisation, secrets, "
+                "dependencies and data exposure. Name the attack and how likely it is, not just the category. Quote "
+                "the file and line or design section each finding comes from.")},
+            {"name": "Performance Engineer", "instructions": (
+                "Review for performance and scale: complexity, hot paths, I/O and network calls, memory, concurrency "
+                "and what breaks first as load grows. Give rough numbers where you can and say what to measure "
+                "before trusting them.")},
+            {"name": "Maintainer", "instructions": (
+                "You will own this code for years. Review readability, boundaries between parts, testability, error "
+                "handling, migration and rollback, and how hard the next change will be. Prefer the simplest design "
+                "that meets the need.")},
+            {"name": "Devil's Advocate", "instructions": (
+                "Argue against the leading option. Find the simpler alternative, the assumption that is most likely "
+                "wrong and the cost nobody has counted. Check every claim against the files and evidence provided "
+                "and flag claims they do not support.")},
+        ],
+        "chairman_guidance": ("Give the verdict (go, go with changes, or no-go, or the option to choose), the findings "
+                              "ranked by severity with where each comes from, the changes required before going "
+                              "ahead, what to test or measure to confirm it, and what would reverse the verdict. "
+                              "The seats can read the files but cannot run code: say which findings need running "
+                              "the code to confirm."),
+        "decision_focus": True,
+    },
 }
 
 DEFAULT_TEMPLATE = "classic"

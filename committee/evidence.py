@@ -28,7 +28,35 @@ SCANNED_MIN_CHARS = 50            # a PDF page with less text than this is treat
 TEXT_EXT = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".log", ".yaml", ".yml", ".xml",
             ".html", ".htm", ".ini", ".cfg", ".toml", ".rst"}
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
-SUPPORTED_EXT = TEXT_EXT | IMAGE_EXT | {".pdf", ".docx", ".xlsx", ".xlsm"}
+# Source code: read as text, sent with line numbers so seats can cite file:line. A file renamed to
+# "<name>.js.txt" (the old workaround) is still read as code.
+CODE_LANG = {
+    ".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript", ".jsx": "JavaScript (JSX)",
+    ".ts": "TypeScript", ".tsx": "TypeScript (TSX)", ".py": "Python", ".pyi": "Python", ".java": "Java",
+    ".kt": "Kotlin", ".kts": "Kotlin", ".swift": "Swift", ".m": "Objective-C", ".mm": "Objective-C++",
+    ".c": "C", ".h": "C header", ".cc": "C++", ".cpp": "C++", ".cxx": "C++", ".hpp": "C++ header", ".hh": "C++ header",
+    ".cs": "C#", ".go": "Go", ".rs": "Rust", ".rb": "Ruby", ".php": "PHP", ".pl": "Perl", ".lua": "Lua",
+    ".r": "R", ".scala": "Scala", ".dart": "Dart", ".ex": "Elixir", ".exs": "Elixir", ".erl": "Erlang",
+    ".hs": "Haskell", ".clj": "Clojure", ".fs": "F#", ".vb": "Visual Basic", ".gd": "GDScript",
+    ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell", ".ps1": "PowerShell", ".psm1": "PowerShell", ".bat": "Batch",
+    ".cmd": "Batch", ".sql": "SQL", ".css": "CSS", ".scss": "SCSS", ".sass": "Sass", ".less": "Less",
+    ".vue": "Vue", ".svelte": "Svelte", ".astro": "Astro", ".graphql": "GraphQL", ".gql": "GraphQL",
+    ".proto": "Protocol Buffers", ".tf": "Terraform", ".hcl": "HCL", ".gradle": "Gradle", ".cmake": "CMake",
+    ".glsl": "GLSL", ".hlsl": "HLSL", ".wgsl": "WGSL", ".shader": "Shader", ".sol": "Solidity", ".zig": "Zig",
+    ".nim": "Nim", ".jl": "Julia", ".v": "Verilog", ".vhd": "VHDL", ".asm": "Assembly", ".s": "Assembly",
+}
+CODE_NAMES = {"dockerfile": "Dockerfile", "makefile": "Makefile", "cmakelists.txt": "CMake", "jenkinsfile": "Groovy",
+              "gemfile": "Ruby", "rakefile": "Ruby", "procfile": "Procfile", "vagrantfile": "Ruby"}
+SUPPORTED_EXT = TEXT_EXT | IMAGE_EXT | set(CODE_LANG) | {".pdf", ".docx", ".xlsx", ".xlsm"}
+# Never text, whatever their content: refused at once with a clear reason.
+BINARY_EXT = {".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".obj", ".a", ".lib", ".class", ".jar", ".war", ".pyc",
+              ".zip", ".7z", ".rar", ".gz", ".tgz", ".bz2", ".xz", ".tar", ".iso", ".dmg", ".msi", ".apk", ".ipa",
+              ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".ttf", ".otf",
+              ".woff", ".woff2", ".psd", ".blend", ".fbx", ".glb", ".sqlite", ".db", ".wasm"}
+SNIFF_BYTES = 65536
+# Folders never searched when a whole folder is added: dependencies, build output, caches.
+SKIP_DIRS = {"node_modules", ".git", "dist", "build", "out", "target", "__pycache__", ".venv", "venv", "env",
+             ".next", ".nuxt", ".cache", "coverage", "vendor", "bin", "obj", ".idea", ".vscode", ".gradle"}
 _MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
 
@@ -40,13 +68,52 @@ def text_tokens(text: str) -> int:
     return math.ceil(len(text or "") / 3.5)
 
 
-def kind_of(name: str) -> str:
+def code_language(name: str) -> str:
+    """The language of a source file from its name ('' when it is not code). "engine.js.txt" counts as JavaScript."""
+    p = PurePath(name)
+    if p.name.lower() in CODE_NAMES:
+        return CODE_NAMES[p.name.lower()]
+    sfx = [s.lower() for s in p.suffixes]
+    if sfx and sfx[-1] in CODE_LANG:
+        return CODE_LANG[sfx[-1]]
+    if len(sfx) >= 2 and sfx[-1] == ".txt" and sfx[-2] in CODE_LANG:
+        return CODE_LANG[sfx[-2]]
+    return ""
+
+
+def looks_text(data: bytes) -> bool:
+    """True when the bytes read as text: no NUL bytes (outside UTF-16) and almost no control characters."""
+    head = data[:SNIFF_BYTES]
+    if not head:
+        return False
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return True
+    if b"\x00" in head:
+        return False
+    try:
+        txt = head.decode("utf-8")
+    except UnicodeDecodeError as e:
+        if e.start < len(head) - 4:          # a multi-byte character cut at the end is fine
+            txt = head.decode("cp1256", errors="replace")
+        else:
+            txt = head[:e.start].decode("utf-8", errors="replace")
+    bad = sum(1 for ch in txt if ord(ch) < 32 and ch not in "\t\n\r\f\x1b")
+    return bad <= max(2, len(txt) // 200)
+
+
+def kind_of(name: str, data: bytes | None = None) -> str:
+    """File kind from its name; a file with an unknown name is accepted as text when its content is text."""
     ext = PurePath(name).suffix.lower()
+    if code_language(name):
+        return "code"
     if ext in TEXT_EXT:
         return "text"
     if ext in IMAGE_EXT:
         return "image"
-    return {".pdf": "pdf", ".docx": "word", ".xlsx": "excel", ".xlsm": "excel"}.get(ext, "")
+    known = {".pdf": "pdf", ".docx": "word", ".xlsx": "excel", ".xlsm": "excel"}.get(ext, "")
+    if known or ext in BINARY_EXT or ext in (".doc", ".xls", ".ppt", ".pptx"):
+        return known
+    return "text" if data is not None and looks_text(data) else ""
 
 
 def unsupported_reason(name: str) -> str:
@@ -57,7 +124,7 @@ def unsupported_reason(name: str) -> str:
         return "Old Excel format (.xls): save it as .xlsx and add it again."
     if ext in (".pptx", ".ppt"):
         return "PowerPoint is not supported yet: save it as PDF and add the PDF."
-    return f"{PurePath(name).suffix or 'This file type'} is not supported. Use text, PDF, Word, Excel or photos."
+    return (f"{PurePath(name).suffix or 'This file'} is not a text file. Use text, code, PDF, Word, Excel or photos.")
 
 
 def extract(name: str, data: bytes) -> dict[str, Any]:
@@ -65,7 +132,7 @@ def extract(name: str, data: bytes) -> dict[str, Any]:
 
     ``items`` are ``{"type": "text", "locator", "text"}`` or
     ``{"type": "image", "locator", "mime", "data", "w", "h"}``. Raises ``EvidenceError``."""
-    kind = kind_of(name)
+    kind = kind_of(name, data)
     if not kind:
         raise EvidenceError(unsupported_reason(name))
     if len(data) > MAX_FILE_BYTES:
@@ -73,7 +140,7 @@ def extract(name: str, data: bytes) -> dict[str, Any]:
     if not data:
         raise EvidenceError("The file is empty.")
     notes: list[str] = []
-    reader = {"text": _text_file, "pdf": _pdf, "word": _docx, "excel": _xlsx, "image": _image_file}[kind]
+    reader = {"text": _text_file, "code": _code_file, "pdf": _pdf, "word": _docx, "excel": _xlsx, "image": _image_file}[kind]
     items = reader(name, data, notes)
     items = _cap_text(items, notes)
     if not items:
@@ -124,6 +191,18 @@ def decode_text(data: bytes) -> str:
 def _text_file(name: str, data: bytes, notes: list[str]) -> list[dict[str, Any]]:
     text = decode_text(data).replace("\r\n", "\n").strip()
     return [{"type": "text", "locator": "", "text": text}] if text else []
+
+
+def _code_file(name: str, data: bytes, notes: list[str]) -> list[dict[str, Any]]:
+    """Source code with each line numbered ("12| …"), so a seat can cite the exact line."""
+    if not looks_text(data):
+        raise EvidenceError("This does not look like a text file, so it cannot be read as code.")
+    lines = decode_text(data).replace("\r\n", "\n").replace("\r", "\n").rstrip().split("\n")
+    if not any(x.strip() for x in lines):
+        return []
+    lang = code_language(name)
+    text = "\n".join(f"{n}| {line.rstrip()}" for n, line in enumerate(lines, 1))
+    return [{"type": "text", "locator": f"{lang} · {len(lines):,} lines, numbered", "text": text}]
 
 
 # ── PDF ──────────────────────────────────────────────────────────────────────

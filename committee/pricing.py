@@ -54,13 +54,16 @@ def _base(run: dict[str, Any]) -> int:
 
 
 def research_calls(run: dict[str, Any]) -> list[tuple[dict, int, int, int]]:
-    """The two chairman calls of Research first (queries, passages), while it has not run yet."""
+    """The three chairman calls of Research first (queries, second-pass plan, passages), before it has run."""
     from . import research
     if not research.wanted(run):
         return []
     q = tok(run.get("question", ""))
+    L = research.depth(run)
+    reading = L["pages"] * research.PAGE_CHARS // 4 + 900          # the pages the passages are picked from
     return [(run["chairman"], research.EST_QUERY_IN + q, 150, research.QUERIES_MAX_TOKENS),
-            (run["chairman"], research.EST_EXCERPT_IN + q, 1200, research.EXCERPTS_MAX_TOKENS)]
+            (run["chairman"], research.EST_FOLLOW_IN + q, 300, research.FOLLOW_MAX_TOKENS),
+            (run["chairman"], reading + q, 1200 if L["name"] == "standard" else 2000, L["pick_tokens"])]
 
 
 def _mt(run: dict[str, Any]) -> int:

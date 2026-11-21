@@ -118,7 +118,7 @@ def test_photos_are_shrunk_and_reencoded():
 def test_unsupported_empty_and_oversize_files(monkeypatch):
     with pytest.raises(ev.EvidenceError, match="save it as .docx"):
         ev.extract("old.doc", b"x")
-    with pytest.raises(ev.EvidenceError, match="not supported"):
+    with pytest.raises(ev.EvidenceError, match="not a text file"):
         ev.extract("movie.mp4", b"x")
     with pytest.raises(ev.EvidenceError, match="empty"):
         ev.extract("a.txt", b"")

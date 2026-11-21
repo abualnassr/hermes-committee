@@ -16,10 +16,13 @@ If the message contains `draft=<id>` (for example `/hermes-committee:convene dra
 the user already set up the committee on the Committee page: question, seats, models, instructions
 and evidence are stored in that draft.
 
+- Your **first action** is `committee_open` with only `draft` set to the id. Then continue with
+  step 4 below.
+- Do **not** look for files first, even when the question mentions attached files or file names:
+  the draft already holds every file from the page. Do not list folders, search, or read any file.
 - Do **not** ask clarifying questions and do **not** change the seats or models.
 - Do **not** add a `brief`, `evidence` or files: the plugin uses exactly what is on the page and
   ignores them. Never add facts about the user from memory.
-- Call `committee_open` with only `draft` set to the id, then continue with step 4 below.
 
 ## 1. Frame the question
 
@@ -57,7 +60,8 @@ what makes the answers grounded:
 
 - Default: omit `preset` and `template` (the user's default preset is used).
 - If the user names a preset or template (`classic`, `expert-panel`, `decision-board`,
-  `red-team`, `reliability-board`), pass it.
+  `red-team`, `reliability-board`, `engineering-review`), pass it. `engineering-review` fits software
+  questions: a design doc, an architecture or library choice, a refactor, or code files to review.
 - If the user describes roles ("a structural engineer, a lawyer and a CFO"), pass them as
   `seats`, each with a `name` and specific `instructions` written from the user's wording.
 - `review: false` only if the user asks for a quick/lite run.
