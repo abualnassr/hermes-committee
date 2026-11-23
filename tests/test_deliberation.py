@@ -140,18 +140,50 @@ def test_who_changed_their_mind_is_computed(settings, fake_llm):
     _go(run, llm)
     mv = run["deliberation"]["moves"]
     assert mv == [{"seat": n[0], "dispute": "D1", "round": 1, "stance": "change", "from": "yes", "to": "no",
-                   "because": "The outage plan [E2] shows the swap is cheaper.", "kept_side": False}]
+                   "because": "The outage plan [E2] shows the swap is cheaper.", "kept_side": False,
+                   # it joined the majority, but with a source it had not cited before: not flagged
+                   "unbacked": False, "alone": True, "new_evidence": ["E2"]}]
     assert run["deliberation"]["open"] == []                 # everyone on 'no' now
 
 
-def test_round_two_only_for_points_still_open(settings, fake_llm):
+def test_round_two_is_skipped_when_round_one_changed_nothing(settings, fake_llm):
     run = _run(settings, rounds=2)
-    llm = fake_llm(agenda=_agenda(run, "action", split=2))   # everyone holds → still open
+    llm = fake_llm(agenda=_agenda(run, "action", split=2))   # everyone holds, nobody cites anything new
     _go(run, llm)
-    assert len(run["deliberation"]["rounds"]) == 2
-    assert run["deliberation"]["open"] == ["D1"]
+    d = run["deliberation"]
+    assert len(d["rounds"]) == 1 and d["open"] == ["D1"] and d["stalled"] == ["D1"]
+    from committee import report_md
+    assert "round 2 skipped D1: no change of side or new evidence there in round 1" in report_md.debate_tally(d)
+    assert "round 2 skipped" in report_md.delib_line(run)
+
+
+def _two_points(run):
+    a = _agenda(run, "action", split=2)
+    second = dict(a["disputes"][0], point="Is the spare in stock?", question="Who checked the stores?")
+    return {"disputes": [a["disputes"][0], second], "reason": a["reason"]}
+
+
+def test_round_two_only_for_points_where_round_one_brought_something_new(settings, fake_llm):
+    run = _run(settings, rounds=2)
+    first = run["seats"][0]
+    # the first member holds on both points but brings a source it had not cited on D2 only
+    reply = {"responses": [{"dispute": "D1", "stance": "hold", "side": "yes", "argument": "I hold.", "evidence": []},
+                           {"dispute": "D2", "stance": "hold", "side": "yes", "argument": "The stores list [E2] shows one.",
+                            "evidence": ["E2"]}], "updated_position": "x", "confidence": 0.7}
+    llm = fake_llm(agenda=_two_points(run), replies={first["model"]: reply})
+    _go(run, llm)
+    d = run["deliberation"]
+    assert [r["disputes"] for r in d["rounds"]] == [["D1", "D2"], ["D2"]] and d["stalled"] == ["D1"]
     second = [x for x in llm.calls if x["schema_name"] == "committee_reply"][-1]
     assert "# Replies in round 1" in second["text"]
+    from committee import report_md
+    assert "round 2 skipped D1: no change of side or new evidence there in round 1" in report_md.debate_tally(d)
+
+
+def test_a_point_nobody_managed_to_reply_on_is_not_stalled():
+    delib = {"disputes": [{"id": "D1", "positions": []}],
+             "rounds": [{"disputes": ["D1"], "replies": {"Ana": {"status": "failed", "error": "empty reply"}}}]}
+    assert e.stalled({"seats": [{"name": "Ana", "label": "A"}], "answers": {}}, delib, ["D1"]) == []
 
 
 def test_round_two_is_not_run_when_settled(settings, fake_llm):

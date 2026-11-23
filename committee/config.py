@@ -20,6 +20,7 @@ correlated answers — the plan says so.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from .templates import DEFAULT_TEMPLATE, get_template
@@ -58,6 +59,21 @@ DELIBERATE_CHOICES = ("material", "action", "always", "never")
 DELIBERATE_DEFAULT = "material"
 
 
+def setup_warnings(slots: list, seats: int, quorum: int) -> list:
+    """Set-ups that fail easily: a model with no provider, and a committee where every seat must answer."""
+    out = []
+    bare = [s.get("name") or "Chairman" for s in slots if s.get("model") and not s.get("provider")]
+    if bare:
+        one = len(bare) == 1
+        out.append(f"{', '.join(bare)} name{'s' if one else ''} a model but no provider, so {'its' if one else 'their'} "
+                   "calls go to your main provider, which may not serve that model. Set the provider for each seat "
+                   "(for example openrouter) to be sure.")
+    if seats >= 2 and quorum >= seats:
+        out.append(f"With {seats} seats every seat must answer: one refused call stops the verdict. "
+                   "Add a seat, or use seats on different providers.")
+    return out
+
+
 def free_model_warnings(slots: list) -> list:
     """Free models (``:free``) are often rate-limited by the provider behind them; when one is refused,
     Hermes answers with the user's main model instead. Said before the run, in plain words."""
@@ -70,10 +86,123 @@ def free_model_warnings(slots: list) -> list:
             "refused too. Paid models are more reliable."]
 
 
+def active_as(run: dict) -> dict[str, str]:
+    """{seat name or 'Chairman': model} for slots set to Hermes's active model, naming the model that really
+    answered (from the call records). A seat given the main model on a retry is one of these."""
+    slots = [(s["name"], s, "stage1") for s in run.get("seats") or []] + [("Chairman", run.get("chairman") or {}, "chair")]
+    out: dict[str, str] = {}
+    for who, slot, stage in slots:
+        if slot.get("model"):
+            continue
+        used = [c for c in run.get("usage") or [] if c.get("who") == who and c.get("model")]
+        pick = [c for c in used if c.get("stage") == stage] or used
+        if pick:
+            out[who] = str(pick[-1]["model"])
+    return out
+
+
 def answered_by(run: dict, who: str) -> str:
-    """' (answered by <model>)' when Hermes answered this seat with another model (see engine.served_by)."""
+    """' (answered by <model>)' when Hermes answered this seat with another model (see engine.served_by), or
+    ' (<model>)' when the seat was set to Hermes's active model, so a report never just says 'active model'."""
     sw = (run.get("switched") or {}).get(who)
-    return f" (answered by {str(sw['model']).rsplit('/', 1)[-1]})" if sw else ""
+    if sw:
+        return f" (answered by {str(sw['model']).rsplit('/', 1)[-1]})"
+    real = active_as(run).get(who)
+    return f" ({real.rsplit('/', 1)[-1]})" if real else ""
+
+
+def _same_model_key(model: str) -> str:
+    """A model id for 'is this the same model?': no route prefix, variant or :free tier. The same model through
+    two providers is one model (same weights, same blind spots); no model named means Hermes's main model."""
+    m = re.sub(r"\[[^\]]*\]$", "", str(model or "").strip().lower())
+    return m.split(":", 1)[0].rsplit("/", 1)[-1] or "(main model)"
+
+
+def independence(run: dict[str, Any]) -> dict[str, Any]:
+    """How many different models wrote the answers that came in. Four answers from two models are not four
+    independent views: a seat answered by Hermes's fallback, or two seats on one model, agree for the same
+    reasons and miss the same things.
+
+    Returns {answers, models, fallback: [seat names], shared: [[seat names on one model], ...], line}.
+    ``line`` is empty when every answer came from its own model."""
+    by: dict[str, list[str]] = {}
+    fallback: list[str] = []
+    real = active_as(run)
+    for s in run.get("seats") or []:
+        if ((run.get("answers") or {}).get(s["label"]) or {}).get("status") != "ok":
+            continue
+        sw = (run.get("switched") or {}).get(s["name"]) or {}
+        model = sw.get("model") if "stage1" in (sw.get("stages") or []) else (s.get("model") or real.get(s["name"]))
+        if "stage1" in (sw.get("stages") or []):
+            fallback.append(s["name"])
+        by.setdefault(_same_model_key(model), []).append(s["name"])
+    n, m = sum(len(v) for v in by.values()), len(by)
+    line = ""
+    if n > 1 and m < n:
+        line = (f"{n} answers came from {m} model{'s' if m != 1 else ''}"
+                + (f" ({len(fallback)} by Hermes's fallback model)" if fallback else "")
+                + (": a single-model panel, not an independent committee." if m == 1 else
+                   ", so agreement between answers from the same model is not independent confirmation."))
+    return {"answers": n, "models": m, "fallback": fallback, "shared": [v for v in by.values() if len(v) > 1],
+            "line": line}
+
+
+CHAIR_SETUP = "The chairman's model ("
+CHAIR_RUN = "The chairman ("
+
+
+def _names_text(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def chair_setup_warning(seats: list[dict[str, Any]], chairman: dict[str, Any]) -> list[str]:
+    """Before a run: the chairman is set to a model that a seat also uses (only when both name a model)."""
+    if not chairman.get("model"):
+        return []
+    key = _same_model_key(chairman["model"])
+    same = [s["name"] for s in seats if s.get("model") and _same_model_key(s["model"]) == key]
+    if not same:
+        return []
+    return [f"{CHAIR_SETUP}{str(chairman['model']).rsplit('/', 1)[-1]}) is also used by {_names_text(same)}: the "
+            f"chairman may favour {'that answer' if len(same) == 1 else 'those answers'} for reading like its own. "
+            "Pick a chairman model no seat uses to avoid it."]
+
+
+def chair_overlap(run: dict[str, Any]) -> dict[str, Any]:
+    """After the verdict: seats whose answer came from the same model as the chairman's verdict.
+    The chairman does not know which answer is its own model's, but models tend to prefer their own style.
+    Returns {model, seats, line}; ``line`` is empty when the chairman shares a model with no answer."""
+    chair = run.get("chair") or {}
+    if chair.get("status") != "ok":
+        return {"model": "", "seats": [], "line": ""}
+    real = active_as(run)
+    sw = (run.get("switched") or {}).get("Chairman") or {}
+    cm = sw.get("model") if "chair" in (sw.get("stages") or []) else \
+        ((run.get("chairman") or {}).get("model") or real.get("Chairman") or "")
+    if not cm:
+        return {"model": "", "seats": [], "line": ""}
+    key, same = _same_model_key(cm), []
+    for s in run.get("seats") or []:
+        if ((run.get("answers") or {}).get(s["label"]) or {}).get("status") != "ok":
+            continue
+        ssw = (run.get("switched") or {}).get(s["name"]) or {}
+        m = ssw.get("model") if "stage1" in (ssw.get("stages") or []) else (s.get("model") or real.get(s["name"]))
+        if m and _same_model_key(m) == key:
+            same.append(s["name"])
+    short = str(cm).rsplit("/", 1)[-1]
+    line = (f"{CHAIR_RUN}{short}) is the same model as {_names_text(same)}, so it may favour "
+            f"{'that answer' if len(same) == 1 else 'those answers'} for reading like its own. Weigh that part of "
+            "the verdict with care.") if same else ""
+    return {"model": short, "seats": same, "line": line}
+
+
+def note_chair_overlap(run: dict[str, Any]) -> None:
+    """Keep one up-to-date warning about it; the run's line replaces the set-up warning, which it confirms."""
+    line = chair_overlap(run)["line"]
+    keep = [w for w in run.get("warnings") or [] if not w.startswith(CHAIR_RUN)]
+    if line:
+        keep = [w for w in keep if not w.startswith(CHAIR_SETUP)] + [line]
+    run["warnings"] = keep
 
 
 def model_label(slot: dict[str, Any]) -> str:
@@ -93,7 +222,8 @@ def build_roster(settings: dict[str, Any] | None, *, preset: str | None = None, 
                  max_minutes: int | float | None = None, max_usd: int | float | None = None,
                  deliberate: str | None = None, deliberate_rounds: int | None = None,
                  chairman_guidance: str | None = None, decision_focus: bool | None = None,
-                 research: bool | None = None, research_secs: int | float | None = None) -> dict[str, Any]:
+                 research: bool | None = None, research_secs: int | float | None = None,
+                 solo: bool | None = None) -> dict[str, Any]:
     """Resolve the committee for one run. Raises ConfigError with a user-facing message."""
     settings = settings if isinstance(settings, dict) else {}
     presets = settings.get("presets") if isinstance(settings.get("presets"), dict) else {}
@@ -174,12 +304,13 @@ def build_roster(settings: dict[str, Any] | None, *, preset: str | None = None, 
     focus = decision_focus if isinstance(decision_focus, bool) else p.get("decision_focus")
     focus = focus if isinstance(focus, bool) else bool(tpl["decision_focus"])
 
-    distinct = {(s["provider"], s["model"]) for s in roster}
+    distinct = {_same_model_key(s["model"]) for s in roster}     # one model through several providers is one model
     warnings = []
     if len(distinct) == 1 and n > 1:
         warnings.append("All seats use the same model, so their answers will be correlated. "
                         "Assign different models in a preset for independent views.")
-    warnings += free_model_warnings([*roster, chairman])
+    warnings += free_model_warnings([*roster, chairman]) + setup_warnings([*roster, chairman], len(roster), quorum)
+    warnings += chair_setup_warning(roster, chairman)
 
     return {
         "preset": preset_name,
@@ -192,6 +323,7 @@ def build_roster(settings: dict[str, Any] | None, *, preset: str | None = None, 
         "chairman": chairman,
         "review": do_review,
         "research": research if isinstance(research, bool) else bool(p.get("research", False)),
+        "solo": solo if isinstance(solo, bool) else bool(p.get("solo", False)),
         "research_secs": _research_cap(research_secs if research_secs not in (None, "") else p.get("research_secs")),
         "deliberate": delib,
         "deliberate_rounds": int(rounds),
@@ -209,5 +341,7 @@ def planned_calls(roster: dict[str, Any]) -> dict[str, int]:
     pictures = len((roster.get("evidence_index") or {}).get("images") or [])
     delib = (1 + n * (roster.get("deliberate_rounds") or 1)) if (roster.get("deliberate") or "never") != "never" else 0
     web = 3 if roster.get("research") else 0
-    return {"research": web, "describe": pictures, "stage1": n, "review": review, "deliberate": delib, "chairman": 1,
-            "total": web + pictures + n + review + 1, "total_if_debate": web + pictures + n + review + 1 + delib}
+    solo = 1 if roster.get("solo") else 0
+    return {"research": web, "describe": pictures, "stage1": n, "solo": solo, "review": review, "deliberate": delib,
+            "chairman": 1, "total": web + pictures + n + solo + review + 1,
+            "total_if_debate": web + pictures + n + solo + review + 1 + delib}

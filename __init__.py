@@ -22,6 +22,7 @@ from typing import Any, Optional
 from .committee import followup  # noqa: E402
 from .committee import __version__
 from .committee import config as cconfig
+from .committee import insights
 from .committee import engine, report_md, store
 from .committee.engine import Reply
 from .committee.templates import list_templates
@@ -62,7 +63,7 @@ def _usage(u: Any) -> dict[str, Any]:
 
 # Thinking levels ride on auxiliary tasks this plugin registers (Hermes folds a task's reasoning_effort into
 # the call). Filled by register(); empty on a Hermes without plugin tasks, and calls then go out as before.
-_THINK_LEVELS = ("low", "medium", "high")
+_THINK_LEVELS = ("none", "low", "medium", "high")   # "none": only for a retry after a reply ran out of room
 _THINK_TASKS: dict[str, str] = {}
 
 
@@ -247,6 +248,8 @@ OPEN_SCHEMA = {
                          "and add short passages with their sources to the evidence, shared by every seat. Use it "
                          "when the question depends on current facts, prices, standards or recent events. Only the "
                          "question is sent to the search provider, never the files. Default false."},
+            "solo": {"type": "boolean", "description":
+                     "Chairman alone: the chairman also answers the question by itself, beside the seats, and its answer is shown next to the committee's verdict, so the user can see whether the committee changed or added anything over one model. The chairman does not see its own answer when it writes the verdict. One extra call on the chairman's model; no extra time. Default false."},
             "research_secs": {"type": "integer", "enum": [45, 90, 150, 240], "description":
                               "Most seconds Research first may take (not counting the source review). Default 90. "
                               "240 is Thorough: more searches, pages and passages; use it only when the user asks "
@@ -299,7 +302,7 @@ def _from_draft(args: dict) -> dict:
     merged["question"] = d.get("question") or args.get("question") or ""
     merged["evidence"] = d.get("evidence") or ""
     merged["brief"] = d.get("brief") or ""
-    for k in ("template", "seats", "chairman", "review", "research", "research_secs", "deliberate", "deliberate_rounds", "chairman_guidance",
+    for k in ("template", "seats", "chairman", "review", "research", "research_secs", "solo", "deliberate", "deliberate_rounds", "chairman_guidance",
               "decision_focus", "preset", "max_minutes",
               "max_usd", "evidence_pack",
               "title", "follow_of", "follow_context", "follow_evidence"):
@@ -474,9 +477,10 @@ def _price_slots(run: dict[str, Any]) -> None:
     run["estimate"] = pricing.estimate(run)
     unknown = run["estimate"]["unknown"]
     if unknown and pricing.limit(run) is not None:
-        run["warnings"].append(f"No price is known for {', '.join(unknown)}: their calls are not counted "
-                               "toward the budget. Enter the price in the Committee page's budget menu, or mark "
-                               "the provider Subscription there.")
+        note = (f"No price is known for {', '.join(unknown)}: their calls are not counted "
+                "toward the budget. Enter the price in the Committee page's budget menu, or mark "
+                "the provider Subscription there.")
+        run["warnings"] = [w for w in run["warnings"] if not w.startswith("No price is known for ")] + [note]
 
 
 def _cli_cost(u: dict[str, Any]) -> str:
@@ -533,7 +537,8 @@ def handle_open(args: dict, **kwargs) -> str:
                                       chairman_guidance=args.get("chairman_guidance"),
                                       decision_focus=args.get("decision_focus"),
                                       research=args.get("research") if isinstance(args.get("research"), bool) else None,
-                                      research_secs=args.get("research_secs"))
+                                      research_secs=args.get("research_secs"),
+                                      solo=args.get("solo") if isinstance(args.get("solo"), bool) else None)
         _set_reserves(roster)
         brief = str(args.get("brief") or "")
         if prev is not None and args.get("follow_context") is not False:
@@ -562,7 +567,7 @@ def handle_open(args: dict, **kwargs) -> str:
         "seats": [{"name": s["name"], "model": cconfig.model_label(s)} for s in run["seats"]],
         "chairman": cconfig.model_label(run["chairman"]), "review": run["review"], "quorum": run["quorum"],
         "deliberate": run["deliberate"], "deliberate_rounds": run["deliberate_rounds"], "research": run["research"],
-        "research_secs": run.get("research_secs"),
+        "research_secs": run.get("research_secs"), "solo": run.get("solo", False),
         "planned_model_calls": cconfig.planned_calls(run), "warnings": run["warnings"],
         "evidence": _evidence_line(run),
         "budget": _budget_line(run),
@@ -611,9 +616,24 @@ def _final_payload(run: dict[str, Any]) -> dict[str, Any]:
                       **({"answered_by": f"{sw['provider']} / {sw['model']}"} if sw else {})})
     return {"ok": run["status"] == "done", "run_id": run["id"], "status": run["status"], "error": run.get("error"),
             "decision": chair.get("decision"), "confidence": chair.get("confidence"),
+            **({"deferred": chair["defer"]} if chair.get("defer") else {}),
             "final_answer": chair.get("final_answer"), "dissent": chair.get("dissent"),
             "next_actions": chair.get("next_actions"), "seats": seats, "ranking": run.get("ranking"),
-            "reports": run.get("reports"), "usage": engine.usage_totals(run), "warnings": run.get("warnings")}
+            "reports": run.get("reports"), "usage": engine.usage_totals(run), "warnings": run.get("warnings"),
+            **({"chairman_alone": insights.solo_compare(run)} if run.get("solo") else {}),
+            **_retry_info(run)}
+
+
+def _retry_info(run: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {"retries": run["retries"]} if run.get("retries") else {}
+    if run.get("status") == "failed":
+        target, why = engine.retry_target(run)
+        out["can_retry"] = bool(target)
+        out["retry_hint"] = (("Retry asks again only the seats that failed; the answers that came in are kept. "
+                              "A failed seat can be given another model, or Hermes's main model."
+                              if target == "stage1" else "Retry runs the chairman again on the same answers.")
+                             if target else why)
+    return out
 
 
 def handle_advance(args: dict, **kwargs) -> str:
@@ -724,6 +744,64 @@ def _on_session_end(session_id=None, interrupted=None, **_kw):
         _cancel_session(str(session_id or ""), "turn interrupted")
 
 
+# ── tool: committee_retry ───────────────────────────────────────────────────
+
+RETRY_SCHEMA = {
+    "name": "committee_retry",
+    "description": ("Retry a committee run that stopped without a verdict. It asks again only the seats that "
+                    "failed (or only the chairman), keeps every answer that came in, and keeps the first "
+                    "attempt's cost. A failed seat can get another model through `swaps`. Then call "
+                    "committee_advance with the same run_id until status is 'done' or 'failed'."),
+    "parameters": {"type": "object", "properties": {
+        "run_id": {"type": "string"},
+        "swaps": {"type": "array", "description": (
+            "Only when the user asks for another model for a failed seat. Each item names the seat and its new "
+            "provider and model; leave provider and model empty for Hermes's main model."),
+            "items": {"type": "object", "properties": {
+                "seat": {"type": "string"}, "provider": {"type": "string"}, "model": {"type": "string"}},
+                "required": ["seat"]}}},
+        "required": ["run_id"]},
+}
+
+
+def handle_retry(args: dict, **kwargs) -> str:
+    args = args or {}
+    run_id = str(args.get("run_id") or "").strip()
+    try:
+        run = store.load(_data_dir(), run_id)
+    except ValueError as exc:
+        return _err(str(exc))
+    if run is None:
+        return _err(f"No committee run {run_id!r}.")
+    with _LOCK:
+        busy = (_ACTIVE.get(run_id) or {}).get("busy")
+    if busy:
+        return _err("This run is still advancing.")
+    swaps = {str(x.get("seat") or ""): {"provider": x.get("provider") or "", "model": x.get("model") or ""}
+             for x in args.get("swaps") or [] if isinstance(x, dict) and x.get("seat")}
+    asked = run.pop("retry_request", None) or {}
+    if not swaps and isinstance(asked.get("swaps"), dict) and engine._now() - float(asked.get("t") or 0) < 3600:
+        swaps = asked["swaps"]                         # chosen on the Committee page, stored with the run
+    try:
+        done = engine.reopen(run, swaps)
+    except ValueError as exc:
+        return _err(str(exc))
+    if done["swapped"]:
+        _price_slots(run)
+    store.clear_cancel(_data_dir(), run["id"])
+    e = _entry(run, str(kwargs.get("session_id") or ""))
+    e["cancel"].clear()
+    _publish(run)
+    _toast(e, f"🔁 Committee retry · {', '.join(done['who'])}")
+    last = run["retries"][-1]
+    return json.dumps({
+        "ok": True, "run_id": run["id"], "status": run["status"], "next_stage": run["next_stage"],
+        "retrying": done["who"], "swapped": done["swapped"], "first_errors": last["errors"],
+        "kept_answers": [s["name"] for s in run["seats"] if (run["answers"].get(s["label"]) or {}).get("status") == "ok"],
+        "next": "Call committee_advance with this run_id, and repeat until status is 'done' or 'failed'.",
+    }, ensure_ascii=False)
+
+
 # ── CLI: hermes committee ... ───────────────────────────────────────────────
 
 def _cli_setup(sub):
@@ -743,6 +821,7 @@ def _cli_setup(sub):
     p.add_argument("--evidence-dir", default=None, help="Folder whose supported files are all used as evidence")
     p.add_argument("--lite", action="store_true", help="Skip Stage 2 (peer ranking)")
     p.add_argument("--research", action="store_true", help="Search the web once before the seats answer (Research first)")
+    p.add_argument("--solo", action="store_true", help="The chairman also answers alone; shown beside the verdict (1 extra call)")
     p.add_argument("--research-secs", type=int, choices=[45, 90, 150, 240], default=None, help="Most seconds the research may take (default 90; 240 = Thorough: more searches, pages and passages)")
     p.add_argument("--deliberate", choices=["material", "action", "always", "never"], default=None,
                    help="Debate disputed points before the verdict (default: material)")
@@ -753,6 +832,11 @@ def _cli_setup(sub):
     p.add_argument("--follow-of", default=None, help="run_id of an earlier committee to follow up (same seats; its verdict as background)")
     p = subs.add_parser("report", help="Re-render a finished run's Markdown and PDF reports (no model calls)")
     p.add_argument("run_id")
+    p = subs.add_parser("retry", help="Retry a run that stopped without a verdict: only the seats that failed "
+                                      "(or the chairman) are asked again")
+    p.add_argument("run_id")
+    p.add_argument("--seat", action="append", default=None, metavar="NAME=PROVIDER/MODEL",
+                   help="Give a failed seat another model; NAME=main uses Hermes's main model. Repeatable.")
 
 
 def _cli(args) -> int:
@@ -796,7 +880,9 @@ def _cli(args) -> int:
         for k, v in run["reports"].items():
             print(f"{k}: {v}")
         return 0 if "pdf" in run["reports"] else 1
-    print("Usage: hermes committee {templates|presets|runs|doctor|run|report}")
+    if cmd == "retry":
+        return _cli_retry(args)
+    print("Usage: hermes committee {templates|presets|runs|doctor|run|report|retry}")
     return 1
 
 
@@ -808,7 +894,7 @@ def _cli_run(args) -> int:
                         if p.is_file() and (p.suffix.lower() in ev.SUPPORTED_EXT or ev.code_language(p.name))
                         and not set(p.relative_to(args.evidence_dir).parts) & ev.SKIP_DIRS)
     req = {"question": args.question, "brief": args.brief, "evidence_paths": paths, "preset": args.preset,
-           "template": args.template, "review": False if args.lite else None, "research": True if args.research else None, "research_secs": args.research_secs, "max_minutes": args.max_minutes, "max_usd": args.max_usd,
+           "template": args.template, "review": False if args.lite else None, "research": True if args.research else None, "research_secs": args.research_secs, "solo": True if getattr(args, "solo", False) else None, "max_minutes": args.max_minutes, "max_usd": args.max_usd,
            "title": args.title, "follow_of": args.follow_of,
            "deliberate": getattr(args, "deliberate", None), "deliberate_rounds": getattr(args, "rounds", None)}
     opened = json.loads(handle_open({k: v for k, v in req.items() if v not in (None, "")}, session_id="",
@@ -823,12 +909,37 @@ def _cli_run(args) -> int:
         print(f"Cost: {opened['budget']}")
     for w in opened.get("warnings") or []:
         print(f"Warning: {w}")
+    return _cli_drive(opened["run_id"], opened.get("warnings") or [])
+
+
+def _cli_retry(args) -> int:
+    swaps = []
+    for item in args.seat or []:
+        name, _, target = item.partition("=")
+        prov, _, model = ("" if target.strip().lower() == "main" else target).partition("/")
+        if not name.strip() or (target.strip().lower() != "main" and not model):
+            print(f"--seat {item!r}: write NAME=PROVIDER/MODEL, or NAME=main for Hermes's main model.")
+            return 1
+        swaps.append({"seat": name.strip(), "provider": prov.strip(), "model": model.strip()})
+    out = json.loads(handle_retry({"run_id": args.run_id, "swaps": swaps}, session_id=""))
+    if not out.get("ok"):
+        print(f"Cannot retry: {out.get('error')}")
+        return 1
+    print(f"Retrying {', '.join(out['retrying'])}" + (f" · kept: {', '.join(out['kept_answers'])}" if out["kept_answers"] else ""))
+    for name, change in (out.get("swapped") or {}).items():
+        print(f"  {name}: {change}")
+    run = store.load(_data_dir(), args.run_id) or {}
+    return _cli_drive(args.run_id, run.get("warnings") or [])
+
+
+def _cli_drive(run_id: str, known_warnings: list) -> int:
     out: dict[str, Any] = {}
     seen_w: set[str] = set()
+    opened = {"warnings": known_warnings}
     while True:
-        out = json.loads(handle_advance({"run_id": opened["run_id"]}, session_id=""))
+        out = json.loads(handle_advance({"run_id": run_id}, session_id=""))
         if out.get("stage_completed"):
-            run_now = store.load(_data_dir(), opened["run_id"]) or {}
+            run_now = store.load(_data_dir(), run_id) or {}
             why = (run_now.get("skipped") or {}).get(out["stage_completed"])
             if why:
                 print(f"  – {out['stage_completed']} skipped ({'budget' if why == 'budget' else 'time limit'})")
@@ -852,6 +963,9 @@ def _cli_run(args) -> int:
     u = out.get("usage") or {}
     print(f"Model calls: {u.get('calls')} · tokens in {u.get('input_tokens')} out {u.get('output_tokens')}"
           + _cli_cost(u))
+    if out.get("status") == "failed" and out.get("can_retry"):
+        print(f"\nTo ask again only what failed: hermes committee retry {run_id}"
+              " [--seat NAME=PROVIDER/MODEL | NAME=main]")
     return 0 if out.get("status") == "done" else 1
 
 
@@ -904,6 +1018,8 @@ def register(ctx):
                       description="Convene a committee of AI models", emoji="🏛")
     ctx.register_tool(name="committee_advance", toolset="committee", schema=ADVANCE_SCHEMA,
                       handler=handle_advance, description="Run the next committee stage", emoji="🏛")
+    ctx.register_tool(name="committee_retry", toolset="committee", schema=RETRY_SCHEMA,
+                      handler=handle_retry, description="Retry the failed part of a committee run", emoji="🔁")
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_cli_command(name="committee", help="hermes-committee: templates, presets, runs, doctor",

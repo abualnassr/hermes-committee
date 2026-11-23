@@ -1,4 +1,7 @@
 Copyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)
+NotoSansMath-Subset.ttf: Copyright 2022 Google LLC. All Rights Reserved. (https://github.com/notofonts/math)
+NotoSansSymbols2-Subset.ttf: Copyright 2022 The Noto Project Authors (https://github.com/notofonts/symbols) (https://github.com/notofonts/symbols)
+The two -Subset fonts are reduced to their arrow, maths and symbol blocks; they are otherwise unmodified.
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

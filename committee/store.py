@@ -30,7 +30,7 @@ def save(base: Path, run: dict[str, Any]) -> Path:
 
 
 _DRAFT_RE = re.compile(r"^d[0-9a-f]{10}$")
-DRAFT_FIELDS = ("question", "brief", "evidence", "template", "preset", "seats", "chairman", "review", "research", "research_secs",
+DRAFT_FIELDS = ("question", "brief", "evidence", "template", "preset", "seats", "chairman", "review", "research", "research_secs", "solo",
                 "deliberate",
                 "chairman_guidance", "decision_focus",
                 "deliberate_rounds", "max_minutes",
@@ -99,6 +99,14 @@ def read_requests(base: Path, run_id: str) -> list[dict[str, Any]]:
         if isinstance(x, dict):
             out.append(x)
     return out
+
+
+def clear_cancel(base: Path, run_id: str) -> None:
+    """Forget an old Stop (a retry starts the run again; a stale flag would cancel it at once)."""
+    try:
+        (run_dir(base, run_id) / CANCEL_FLAG).unlink(missing_ok=True)
+    except (ValueError, OSError):
+        pass
 
 
 def cancel_requested(base: Path, run_id: str) -> bool:

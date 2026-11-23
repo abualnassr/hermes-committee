@@ -76,7 +76,8 @@ def test_full_run_through_the_tools(plugin, tmp_path):
     doc = fitz.open(run["reports"]["pdf"])
     text = " ".join(p.get_text() for p in doc).replace("\n", " ")
     assert "D1 · Swap now?" in text and "Deliberation was set to run when they disagreed" in text
-    assert any(t[1] == "Deliberation" for t in doc.get_toc())
+    toc = [t[1] for t in doc.get_toc()]
+    assert "Where they disagreed" in toc and "Appendix B · The debate in full" in toc
     assert "Nobody moved" in text                       # the insight
 
 

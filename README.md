@@ -12,8 +12,8 @@ decision, its dissent, next actions and a PDF report.
 
 | 1 · Brief | 2 · Convene | 3 · Decision |
 |---|---|---|
-| [![The brief: question, evidence, Research first, and the committee's seats with one open for editing](docs/images/brief.png)](docs/images/brief.png) | [![Convene: the evidence box with files and web sources over the table, seats on an arc debating, the chairman's bench, timeline and live log](docs/images/convene.png)](docs/images/convene.png) | [![Decision: the ruling, figures, next actions with owners, and how the table stood](docs/images/decision.png)](docs/images/decision.png) |
-| Ask, add evidence, switch on Research first, and give each seat a model, instructions and a thinking level. | Watch the research, the answers, the blind vote and the debate as they happen. | The verdict, its confidence, next actions, dissent and the ranking. |
+| [![The brief: question, evidence, Research first and Chairman alone switched on, and the committee's seats with one open for editing](docs/images/brief.png)](docs/images/brief.png) | [![Convene: the evidence box with files and web sources over the table, seats on an arc debating, the chairman's bench, timeline and live log](docs/images/convene.png)](docs/images/convene.png) | [![Decision: the ruling, figures, next actions, the chairman's own answer beside the committee's, and the debate with a seat flagged for joining the majority without new evidence](docs/images/decision.png)](docs/images/decision.png) |
+| Ask, add evidence, switch on Research first or Chairman alone, and give each seat a model, instructions and a thinking level. | Watch the research, the answers, the blind vote and the debate as they happen. | The verdict and next actions, the chairman's own answer beside it, and who changed their mind in the debate, and why. |
 
 <sub>Screenshots use an invented example, replayed with a scripted model: the model names are real (they show each maker's logo), the answers are not theirs.</sub>
 
@@ -94,8 +94,12 @@ describing photos, the blind vote, listing the disputes, debate replies) use *lo
 set *Thinking for the answer* to Low, Medium, High or Model default (nothing sent: the provider's
 own default); the chairman row sets *Thinking for the verdict*. Some models ignore the level; a
 provider that rejects it is called the way it was before, and the plugin remembers that. The
-levels are three auxiliary tasks the plugin registers (`committee_think_low`, `_medium`, `_high`);
-they carry only the reasoning level, the committee still picks each seat's model.
+levels are four auxiliary tasks the plugin registers (`committee_think_none`, `_low`, `_medium`,
+`_high`); they carry only the reasoning level, the committee still picks each seat's model.
+If a clerical reply (a debate reply, a ranking, the list of disputes, a photo description) stops at
+its length cap with nothing usable, which happens with models that keep thinking even on *low*, it is
+asked again with more room **and thinking off**, and that seat's later clerical calls in the run start
+with thinking off. Its answer and the verdict keep their level.
 *When to use it:* raise a seat to High for a question that needs real working out; leave the
 rest. A model whose default is heavy thinking gets much faster on these settings: in one test,
 listing the disputes took 45 s on low against 229 s on that model's default.
@@ -129,6 +133,17 @@ Only your question goes to the search provider, never your files. The sources ar
 Decision page (**Web sources** tab) and in the report.
 *When to use it:* questions that depend on current facts, prices, standards or recent events.
 Leave it off for your own data and internal decisions.
+
+**⚖ Chairman alone** (a switch under Research first, off by default). The chairman also answers the
+question by itself, at the same time as the seats, with the same question and evidence and no role.
+The Decision page and the reports show that answer next to the committee's verdict (*On its own* /
+*With the committee*). The chairman never sees its own answer when it writes the verdict, so it
+cannot anchor on it. One extra call on the chairman's model, counted in the estimate and the budget;
+no extra time. If that call fails, the verdict is unaffected. Nothing judges the two answers: the
+page shows both and leaves the comparison to you.
+*When to use it:* to find out whether a committee is worth it for a kind of question. If the two
+keep matching, one model may be enough; if the committee keeps adding a condition or a check, it is
+earning its cost.
 
 ### 4. Pick your committee
 
@@ -206,9 +221,19 @@ on, or *only emphasis*. The plugin, not the model, then decides from your settin
 
 In a round, every seat sees the others' answers (by name) and must answer each point: **hold**,
 **change** or **partly**, with its argument and evidence. "The majority agrees" is not accepted as a
-reason. With **2 rounds**, the second covers only the points still open. The chairman then makes the
-final call and says which argument decided each point; a view still held after the debate stays as
-dissent. The verdict's **Deliberation** tab and the report show each seat's position before and after,
+reason. With **2 rounds**, the second covers only the points still open, and leaves out a point where
+round 1 changed nothing (nobody moved and nobody cited a source they had not used before), since
+another round would only repeat the arguments; the debate summary names those points (*round 2
+skipped D1, D3: …*). The chairman then makes the final call and says which argument decided each
+point; a view still held after the debate stays as dissent.
+
+**⚑ Joined the majority without new evidence.** AI debates have a known failure: members give in to
+the majority more often than they are persuaded, and asking them not to does not help. So the plugin
+checks it in code: a change of side is flagged when most of the other seats already held the new
+side and the reply cites no evidence that seat had not cited before. The flag shows in the debate on
+the page and in the reports, and the chairman gets that seat's original view, with an instruction to
+weigh it as if it had been kept. A move toward a minority, a concession, or a change backed by a new
+source is not flagged. The check counts sources; it cannot judge how good an argument is. The verdict's **Deliberation** tab and the report show each seat's position before and after,
 and who changed their mind and why, so you can tell persuasion by evidence from going along.
 
 Cost and time: one round is about one more answer per seat, plus one short chairman call to list the
@@ -275,8 +300,21 @@ dissent, debate, time, cost and calls.
 - Under the decision, the **bottom line** in plain words (the same text as page 1 of the PDF).
 - **Why**, **Do next** and **What would change this**. Next actions show an owner and a timing
   when the question or evidence names them; otherwise "—". The chairman never invents people.
+- **⏸ Not yet: one fact decides it.** When the right decision turns on one specific fact nobody has
+  and you can find out, the chairman may defer: it names the fact, how to find it, and the decision if
+  yes and if no. The plugin checks the rule: a deferral that gives the same decision either way, or
+  leaves one answer without a decision, is refused and the decision stands. Several missing facts are
+  not a reason to defer; the chairman must decide.
+- **⚖ Chairman alone vs the committee** (when it was on): the chairman's own answer next to the verdict.
 - **How the table stood**: green seats are in line with the decision, amber ones dissent.
-- **Blind ranking** and the vote matrix (who ranked whom; the dashed cell is a seat's own answer).
+- **Blind ranking** and the vote matrix (who ranked whom). Each seat ranks every answer, its own
+  included, but its vote for its own answer (the dashed cell) is not counted.
+- **Warnings** under the decision, when they apply (also in the chat result and both reports):
+  answers that came from fewer models than seats (*4 answers came from 2 models*: a fallback model or
+  one model on two seats agrees for the same reasons, and the chairman is told to count it once);
+  citations to evidence that does not exist (*Architect cites [E9]*); a chairman that is the same
+  model as a seat; and a point the seats still disputed that the verdict does not address. Warnings
+  never change the decision.
 - Tabs: **Answers ranked** (click one to read it in full), **Debate** (when it was on),
   **Dissent**, **Insights**, **Time & cost**, **Agreement** and the **Full answer**.
 - **📄 Show the PDF** opens the report folder; **⧉ Markdown** the same report as Markdown.
@@ -395,7 +433,10 @@ files, use the Committee page, where you can see each file's size and the cost b
 | "The committee backend is not answering" | Run `hermes gateway restart`. The page's backend loads when the gateway starts. |
 | The run finished but there is no PDF | `hermes gateway restart`, then `hermes committee report <run-id>` creates the PDF from the saved run, with no new model calls. |
 | "One-time permission needed" | Copy the command shown, run it in a terminal, press Convene again. See 🔒 above. |
-| A seat says **no answer** | Its provider failed or timed out; the seat shows a one-line reason (rate-limited, out of credit, key refused, model not found, timed out). The run continues while enough seats answered (the quorum); if too few did, it says which seats failed, why, and what to change. Pick a different model for that seat next time. |
+| A seat says **no answer** | Its provider failed or timed out; the seat shows a one-line reason (rate-limited, out of credit, key refused, no usable key, provider unavailable, model not found, timed out). The run continues while enough seats answered (the quorum); if too few did, it says which seats failed, why, and what to change. Pick a different model for that seat next time. |
+| **No verdict** because too few seats answered, or the chairman failed | Press **Retry** in the *No verdict* panel (or say "retry it" in the chat, or `hermes committee retry <run-id>`). Only the failed seats, or only the chairman, are asked again; the answers that came in are kept. Tick *use Hermes's main model* for a seat whose provider keeps failing. Up to 3 retries per run. |
+| **Only 1 of 2 seats answered** and no verdict | With 2 or 3 seats every seat must answer, so one refusal stops the verdict (the page warns before the run). Use 4 seats, or seats on different providers. |
+| A seat set from chat has a model but **no provider** | Its calls go to your main provider, which may not serve that model (a router can answer "no usable key"). Set each seat's provider, for example `openrouter`. |
 | A seat shows **↺** and another model's name | Its own model was refused (often a rate-limited free model), so Hermes answered with your main model. The answer is kept but is not an independent view. Pick a paid model or another provider for that seat. |
 | The request was typed in the chat but did not start | Press **Enter** in that chat. |
 | Not sure every model works | `hermes committee doctor` makes one tiny call per seat and reports any that fail. |
@@ -405,8 +446,8 @@ files, use the Committee page, where you can see each file's size and the cost b
 ## Cost, privacy and risk (please read)
 
 - **One run makes about 2 × seats + 1 model calls**: the seats answer, the seats vote, the chairman
-  decides. Research first adds 3, each photo or scanned page adds 1 (its description), and a debate
-  adds 1 + seats × rounds. The page shows the count before you press Convene. Reasoning models can use many
+  decides. Research first adds 3, each photo or scanned page adds 1 (its description), Chairman alone
+  adds 1, and a debate adds 1 + seats × rounds. The page shows the count before you press Convene. Reasoning models can use many
   tokens. Token counts are recorded for every call, with an **estimated cost** (tokens × list
   price) and a cost table by stage in the report. Your provider's bill is the real figure:
   cached prompts, discounts or taxes can make it differ.
@@ -447,9 +488,10 @@ files, use the Committee page, where you can see each file's size and the cost b
 | 0. Brief | Hermes frames the question and gathers an **evidence pack** (your files, numbers, short research with sources). From the page, your evidence box is the pack. | Optional |
 | 0b. Research first | One web search through Hermes's own tools; checked passages with sources join the evidence as [W1]…, the same for every seat. Page runs pause for you to untick sources. | Optional, off by default |
 | 1. Answers | Every seat answers **independently and in parallel**, with its role and instructions. | Roles optional |
-| 2. Peer ranking | Every seat ranks **all answers, anonymized** as Response A, B, C… Each reviewer sees them in a **different shuffled order**, and names and model ids are scrubbed from the text. | Shuffled per reviewer |
-| 2b. Deliberation | Optional, after the vote. The chairman lists the disputed points and tags each (action / claim / emphasis); the **plugin** decides from the setting whether to debate. Each seat holds or changes its position per point, with a reason; 1 or 2 rounds. | Optional |
-| 3. Chairman | The chairman writes the final answer from the answers, critiques, rankings and any deliberation, and says which argument decided each disputed point. It must **keep dissent visible**. | Dissent kept |
+| 2. Peer ranking | Every seat ranks **all answers, anonymized** as Response A, B, C… Each reviewer sees them in a **different shuffled order**, and names and model ids are scrubbed from the text. A seat's vote for its own answer is not counted. | Shuffled per reviewer |
+| 2b. Deliberation | Optional, after the vote. The chairman lists the disputed points and tags each (action / claim / emphasis); the **plugin** decides from the setting whether to debate. Each seat holds or changes its position per point, with a reason; 1 or 2 rounds. A side change to the majority without new evidence is flagged in code. | Optional |
+| 3. Chairman | The chairman writes the final answer from the answers, critiques, rankings and any deliberation, and says which argument decided each disputed point. It must **keep dissent visible**. It may answer *Not yet* only when one named fact decides it. | Dissent kept |
+| 3b. Chairman alone | Optional, alongside stage 1: the chairman answers by itself; shown beside the verdict, never shown to the chairman. | Optional, off by default |
 | Report | Markdown + PDF: verdict, roster, ranking matrix, agreement and dissent, one page per seat, method and usage. | Executive summary on page 1 |
 
 Each stage is its own tool call, run by plugin code, so the model cannot skip a stage or see
@@ -501,7 +543,10 @@ hermes committee runs             # recent runs and their reports
 hermes committee run "question"   # run a committee headless (scripts, cron)
                                   #   --max-minutes 5 (0 = no limit), --max-usd 1.5 (0 = no limit),
                                   #   --lite (no blind vote), --research (Research first),
+                                  #   --solo (Chairman alone),
                                   #   --evidence-file a.pdf (repeat), --evidence-dir ./evidence
+hermes committee retry <run-id>   # ask the failed seats (or the chairman) again; keeps the rest
+                                  #   --seat NAME=PROVIDER/MODEL or --seat NAME=main to switch a model
 hermes committee report <run-id>  # re-create a run's Markdown and PDF (no model calls)
 ```
 
@@ -550,7 +595,8 @@ fallback, drafts and the permission check, the reports, and the tool/hook glue.
 
 - The three-stage core (independent answers, anonymous peer ranking, chairman) builds on Andrej
   Karpathy's [llm-council](https://github.com/karpathy/llm-council).
-- Fonts: Noto Sans and Noto Naskh Arabic, SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
+- Fonts: Noto Sans, Noto Naskh Arabic, and subsets of Noto Sans Math and Noto Sans Symbols 2 (arrows, maths
+  and symbols), SIL Open Font License 1.1 (`assets/fonts/OFL.txt`).
 - Model logos: single-colour icons from [lobe-icons](https://github.com/lobehub/lobe-icons), MIT
   (`desktop/THIRD_PARTY_NOTICES.md`). The logos are their owners' trademarks, shown only to identify
   which maker's model sits in a seat.

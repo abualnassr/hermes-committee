@@ -24,6 +24,17 @@ and evidence are stored in that draft.
 - Do **not** add a `brief`, `evidence` or files: the plugin uses exactly what is on the page and
   ignores them. Never add facts about the user from memory.
 
+## 0b. A retry (`retry=<run_id>`, or the user asks to retry a failed run)
+
+If the message contains `retry=<run_id>` (the Committee page's Retry button), or the user asks to retry a
+committee that stopped without a verdict:
+
+- Call `committee_retry` with the `run_id`. Pass `swaps` only when the user named another model for a
+  failed seat in this conversation (empty provider and model = Hermes's main model). With `retry=<id>` from
+  the page, pass no `swaps`: the page already stored the choice.
+- Do not open a new run, ask questions, change seats, or add evidence. Then continue with step 4.2
+  (`committee_advance` until the status is `done`, `failed` or `cancelled`) and step 5.
+
 ## 1. Frame the question
 
 - Take the question from the user's message (text after the command, or the conversation).
@@ -109,7 +120,9 @@ When `status` is `done`:
 - Pass on any `warnings` (e.g. all seats on the same model → correlated answers).
 
 When `status` is `failed`: say which stage failed and why (`error`), name seats that did not
-answer, and still deliver whatever report paths exist. When `cancelled`: confirm it stopped.
+answer, and still deliver whatever report paths exist. If `can_retry` is true, add one line from
+`retry_hint`: the user can ask you to retry (the answers that came in are kept), optionally with another
+model for a failed seat. Do not retry unless the user asks. When `cancelled`: confirm it stopped.
 
 ## Rules
 

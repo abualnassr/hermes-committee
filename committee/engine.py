@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Protocol
 
 from . import hostcaps, pricing, prompts, research
-from .config import model_label
+from .config import independence, model_label
 
 STAGES = ("stage1", "review", "deliberate", "chair")
 _POLL_S = 0.5
@@ -57,7 +57,7 @@ def thinking_for(stage: str, slot: dict[str, Any]) -> str:
     """The level for one call: the seat's or chairman's own choice on the steps it controls (the answer,
     the verdict), the clerical level everywhere else. A model that rejected the setting before gets
     'default' (nothing sent)."""
-    if stage == "stage1":
+    if stage in ("stage1", "solo"):
         level = slot.get("thinking") or THINK_ANSWER
     elif stage == "chair":
         level = slot.get("thinking") or THINK_VERDICT
@@ -110,6 +110,8 @@ def new_run(roster: dict[str, Any], *, question: str, brief: str = "", evidence:
                                   "chairman", "review", "quorum", "stage_timeout", "max_tokens", "warnings")},
         "deliberate": roster.get("deliberate") or "never",
         "research": bool(roster.get("research")),
+        "solo": bool(roster.get("solo")),
+        "solo_answer": None,
         "research_secs": research.cap_of(roster.get("research_secs")),
         "web": None,
         "deliberate_rounds": 2 if roster.get("deliberate_rounds") == 2 else 1,
@@ -349,12 +351,18 @@ def _model_base(model: str) -> str:
     return m.split(":", 1)[0].rsplit("/", 1)[-1]
 
 
+# Ids a router or endpoint reports instead of the model it ran ("auto"): they say nothing about which model answered.
+_PLACEHOLDER_IDS = {"auto", "default", "router", "best", "any", "fallback", "model", "unknown", "none"}
+
+
 def served_by(slot: dict[str, Any], reply: Reply) -> Optional[tuple[str, str]]:
     """(provider, model) when a different model answered than the seat asked for: Hermes falls back to the
     user's main model when the seat's model is refused (a rate-limited free model, an outage). None when it
     matches, or when the seat set no model. A dated or prefixed id of the same model still matches."""
     want, got = _model_base(slot.get("model") or ""), _model_base(reply.model or "")
     if not want or not got or want == got or got.startswith(want) or want.startswith(got):
+        return None
+    if got in _PLACEHOLDER_IDS or want in _PLACEHOLDER_IDS:   # a router that does not name its model: unknown, not a switch
         return None
     return reply.provider or "", reply.model or ""
 
@@ -386,7 +394,8 @@ def _record_usage(run: dict[str, Any], stage: str, who: str, slot: dict[str, Any
 
 
 _STAGE_WORDS = {"stage1": "answer", "review": "ranking", "deliberate": "debate", "chair": "verdict",
-                "agenda": "agenda", "describe": "picture descriptions", "research": "research"}
+                "agenda": "agenda", "describe": "picture descriptions", "research": "research",
+                "solo": "answer alone"}
 
 
 def _note_switch(run: dict[str, Any], stage: str, who: str, slot: dict[str, Any], provider: str, model: str) -> None:
@@ -419,6 +428,9 @@ def describe_error(exc: BaseException) -> str:
     kind = {429: "rate-limited (429)", 402: "out of credit or over the plan's limit (402)",
             401: "the provider refused the key (401)", 403: "the provider refused the key (403)",
             404: "model not found (404)"}.get(int(code) if code else 0)
+    if kind is None and code and 500 <= int(code) < 600:
+        kind = (f"no usable key at the provider ({code})" if re.search(r"\bkeys?\b", detail, re.I)
+                else f"the provider is unavailable ({code})")
     if kind is None:
         low = raw.lower()
         kind = "timed out" if "timeout" in low or "timed out" in low else type(exc).__name__
@@ -443,8 +455,13 @@ def failure_summary(run: dict[str, Any], results: dict[str, tuple[bool, Any]]) -
                        if len(provs) == 1 else "Use paid models or wait a few minutes."))
     if any("credit" in k for k in groups):
         tips.append("Add credit or pick another provider.")
-    if any("key" in k for k in groups):
+    if any("refused the key" in k for k in groups):
         tips.append("Check the provider's key with `hermes model`.")
+    if any("no usable key" in k for k in groups):
+        tips.append("The provider (or your router) has no working key for that model, or hit a daily cap: check its "
+                    "key with `hermes model`, give the seat another provider, or wait for the cap to reset.")
+    if any("unavailable" in k for k in groups):
+        tips.append("Try again later or give the seat another provider.")
     if any("not found" in k for k in groups):
         tips.append("Pick a model the provider lists.")
     return "; ".join(parts) + "." + (" " + " ".join(tips) if tips else "")
@@ -475,15 +492,17 @@ def _over(run: dict[str, Any], calls: list[tuple]) -> tuple[bool, float]:
     return (room is not None and need > room + 1e-9), need
 
 
-def _budget_gate_stage1(run: dict[str, Any]) -> Optional[str]:
+def _budget_gate_stage1(run: dict[str, Any], only: Optional[set] = None) -> Optional[str]:
     """Before any call: answers + picture descriptions + the chairman's share must fit, lowering the
-    output cap (not below FLOOR_TOKENS) if needed. Returns an error to fail with, or None."""
+    output cap (not below FLOOR_TOKENS) if needed. Returns an error to fail with, or None.
+    ``only``: the seats still to answer (a retry); what the first attempt spent is already counted."""
     if pricing.limit(run) is None:
         return None
     full = int(run["max_tokens"])
     steps = [full] + [m for m in pricing.CUT_STEPS if m < full]
     for mt in steps:
-        calls = pricing.describe_calls(run) + pricing.stage1_calls(run, mt) + [pricing.chair_call(run, mt, with_review=False)]
+        calls = pricing.describe_calls(run) + pricing.stage1_calls(run, mt, only) + [pricing.chair_call(run, mt, with_review=False)] \
+            + ([pricing.solo_call(run, mt)] if solo_wanted(run) else [])
         over, need = _over(run, calls)
         if not over:
             if mt < full:
@@ -508,6 +527,8 @@ def _call_structured(llm: LLM, run, stage, who, slot, instructions, text, schema
               timeout=float(run["stage_timeout"]), purpose=f"hermes-committee.{stage}")
     extra = {"images": images} if images else {}
     think = thinking_for(stage, slot)
+    if think != "default" and stage not in KEEP_THINKING and who in (run.get("think_off") or []):
+        think = "none"                      # this seat already spent a whole reply thinking in this run
     retried_json = False
     for _attempt in range(4):
         t0 = time.monotonic()
@@ -515,6 +536,9 @@ def _call_structured(llm: LLM, run, stage, who, slot, instructions, text, schema
             r = _import_safe(lambda: llm.structured(instructions=instructions, text=text, schema=schema, schema_name=name,
                                                     thinking=think, **kw, **extra))
         except Exception as exc:  # noqa: BLE001
+            if think == "none" and hostcaps.looks_like_thinking_rejection(exc):
+                think = "default"           # 'off' refused: ask the usual way, without marking the model
+                continue
             if think != "default" and hostcaps.looks_like_thinking_rejection(exc):
                 # This provider refuses a reasoning level: remember it, and call it the way it was before.
                 hostcaps.learn(slot.get("provider") or "", slot.get("model") or "", thinking=False)
@@ -536,6 +560,14 @@ def _call_structured(llm: LLM, run, stage, who, slot, instructions, text, schema
         _record_usage(run, stage, who, slot, r, time.monotonic() - t0, think)
         if r.content_type == "json" and isinstance(r.parsed, dict):
             return r.parsed, r.text or "", False
+        if _more_room(run, kw, r) and think not in ("default", "none") and stage not in KEEP_THINKING:
+            # It spent the whole reply thinking. More room alone did not help in live runs (a seat thought
+            # through 1,200, 3,600 and 8,192 tokens and wrote nothing), so the next try also turns thinking
+            # off, and so do this seat's later calls of this kind in the run.
+            think = "none"
+            off = run.setdefault("think_off", [])
+            if who not in off:
+                off.append(who)
         if retried_json:
             break
         retried_json = True
@@ -545,6 +577,24 @@ def _call_structured(llm: LLM, run, stage, who, slot, instructions, text, schema
                                       thinking=think, **kw))
     _record_usage(run, stage, who, slot, r, time.monotonic() - t0, think)
     return None, r.text or "", True
+
+
+CUT_OFF = 0.95        # a reply that used this share of its output cap was probably cut off
+
+
+KEEP_THINKING = ("stage1", "solo", "chair")   # the answer and the verdict keep their thinking level
+
+
+def _more_room(run: dict[str, Any], kw: dict[str, Any], r: Reply) -> bool:
+    """When a reply stopped at its output cap without usable JSON, give the next try three times the room, up
+    to the run's own cap. Thinking models can spend a small cap (a 1,200-token debate reply) on thinking and
+    write nothing; asking again with the same cap fails the same way."""
+    out, cap = (r.usage or {}).get("output_tokens"), int(kw["max_tokens"])
+    ceiling = int(run.get("max_tokens") or cap)
+    cut = isinstance(out, (int, float)) and out >= CUT_OFF * cap
+    if cut and cap < ceiling:
+        kw["max_tokens"] = min(ceiling, cap * 3)
+    return cut
 
 
 def _import_safe(fn, tries: int = 3):
@@ -813,8 +863,19 @@ def _norm_answer(parsed: Optional[dict], raw: str) -> dict[str, Any]:
             "evidence_gaps": _as_list(parsed.get("evidence_gaps"))}
 
 
+SOLO_KEY = "_solo"
+
+
+def solo_wanted(run: dict[str, Any]) -> bool:
+    """The chairman-alone answer is asked for and not in yet (a retry asks again only if it failed)."""
+    return bool(run.get("solo")) and (run.get("solo_answer") or {}).get("status") != "ok"
+
+
 def run_stage1(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress: Progress) -> None:
-    n = len(run["seats"])
+    # A retry asks only the seats that have no answer; the answers that came in are kept as they are.
+    todo = [s for s in run["seats"] if (run["answers"].get(s["label"]) or {}).get("status") != "ok"]
+    retry = len(todo) < len(run["seats"])
+    n = len(todo)
     done = [0]
 
     def job(seat):
@@ -832,22 +893,33 @@ def run_stage1(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress:
             return {**ans, "fallback": fb, "secs": round(time.monotonic() - t0, 1)}
         return go
 
+    def solo_job():
+        # The chairman answers the question by itself, as one more member would, so its answer can be put
+        # beside the committee's verdict. It never sees this answer when it writes the verdict.
+        t0 = time.monotonic()
+        instr, text = prompts.solo(run)
+        parsed, raw, fb = _call_structured(llm, run, "solo", "Chairman", run["chairman"], instr, text,
+                                           prompts.STAGE1_SCHEMA, "committee_answer")
+        ans = _norm_answer(parsed, raw)
+        if not ans["answer"]:
+            raise RuntimeError("empty answer")
+        return {**ans, "fallback": fb, "secs": round(time.monotonic() - t0, 1)}
+
     got: dict[str, tuple[bool, Any]] = {}
 
     def on_done(key, ok):
+        if key == SOLO_KEY:
+            return
         done[0] += 1
         run["live"]["done"][key] = ok
         if ok:
             run["live"].setdefault("answers", {})[key] = _clip(str(got[key][1].get("summary") or ""), 240)
-        progress(f"Stage 1 of 3 · {done[0]}/{n} seats answered")
+        progress(f"Stage 1 of 3 · {done[0]}/{n} {'retried ' if retry else ''}seats answered")
 
     lim = run.get("limits") or {}
     if lim.get("max_secs") and not run.get("deadline"):
         run["deadline"] = _now() + lim["max_secs"]
-    lim = run.get("limits") or {}
-    if lim.get("max_secs") and not run.get("deadline"):
-        run["deadline"] = _now() + lim["max_secs"]
-    err = _budget_gate_stage1(run)
+    err = _budget_gate_stage1(run, {s["label"] for s in todo} if retry else None)
     if err:
         run["status"], run["next_stage"], run["error"] = "failed", None, err
         run.setdefault("skipped", {})["run"] = "budget"
@@ -863,17 +935,31 @@ def run_stage1(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress:
     # actually left (a live run lost a seat at 82 s while 200 s went unused when the vote was reserved).
     window = stage_window(run, "stage1", reserve_review=False)
     run["live"] = {"stage": "stage1", "started": _now(), "done": {}, "ends": _now() + window}
-    progress(f"Stage 1 of 3 · 0/{n} seats answered")
+    progress(f"Stage 1 of 3 · 0/{n} {'retried ' if retry else ''}seats answered")
     why = "time limit" if window < run["stage_timeout"] else ""
-    results = _parallel({s["label"]: job(s) for s in run["seats"]}, timeout=window,
-                        cancel=cancel, on_done=on_done, why=why, into=got)
+    jobs = {s["label"]: job(s) for s in todo}
+    if solo_wanted(run):
+        jobs[SOLO_KEY] = solo_job
+    results = _parallel(jobs, timeout=window, cancel=cancel, on_done=on_done, why=why, into=got)
+    if SOLO_KEY in jobs:
+        ok, val = results.get(SOLO_KEY, (False, "not run"))
+        run["solo_answer"] = {"status": "ok", **val} if ok else {"status": "failed", "error": val}
+        _record_abandoned(run, "solo", {SOLO_KEY: (run["chairman"], "Chairman", *pricing.solo_call(run)[1:2],
+                                                   pricing.solo_call(run)[3])}, results)
     _record_abandoned(run, "stage1", {s["label"]: (s, s["name"], tin, hi) for s, tin, _lo, hi in
                                        pricing.stage1_calls(run)}, results)
-    for s in run["seats"]:
+    for s in todo:
         ok, val = results.get(s["label"], (False, "not run"))
         run["answers"][s["label"]] = {"status": "ok", **val} if ok else {"status": "failed", "error": val}
     ok_n = sum(1 for a in run["answers"].values() if a["status"] == "ok")
-    run["timeline"].append({"t": _now(), "event": "stage1", "answered": ok_n, "of": n})
+    n = len(run["seats"])
+    ind = independence(run)
+    run["warnings"] = [w for w in run["warnings"] if not w.split(" answers came from ")[0].isdigit()]
+    same_plan = any(w.startswith("All seats use the same model") for w in run["warnings"])
+    if ind["line"] and (ind["fallback"] or not same_plan):   # said once: the plan's warning already covers one model
+        run["warnings"].append(ind["line"])
+    run["timeline"].append({"t": _now(), "event": "stage1", "answered": ok_n, "of": n,
+                            **({"retried": [s["name"] for s in todo]} if retry else {})})
     if ok_n < run["quorum"]:
         run["status"], run["next_stage"] = "failed", None
         run["error"] = f"Only {ok_n} of {n} seats answered; the quorum is {run['quorum']}."
@@ -884,6 +970,78 @@ def run_stage1(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress:
     run["status"] = "stage1_done"
     run["next_stage"] = "review" if run["review"] and ok_n >= 2 and not run.setdefault("skipped", {}).get("review") \
         else after_vote(run)
+
+
+# ── retry ───────────────────────────────────────────────────────────────────
+
+MAX_RETRIES = 3
+
+
+def retry_target(run: dict[str, Any]) -> tuple[Optional[str], str]:
+    """What a retry would run again: ("stage1", "") for the seats that failed, ("chair", "") for the chairman,
+    or (None, why not). Only a run that stopped without a verdict can be retried: re-asking a seat of a
+    finished run would mean running the vote, the debate and the verdict again."""
+    if run.get("status") != "failed":
+        return None, "Only a run that stopped without a verdict can be retried."
+    if (run.get("skipped") or {}).get("run") == "budget":
+        return None, ("This run never started: it could cost more than its budget. Convene it again with a higher "
+                      "limit, fewer seats or cheaper models.")
+    if len(run.get("retries") or []) >= MAX_RETRIES:
+        return None, f"This run was already retried {MAX_RETRIES} times. Convene it again with other models."
+    chair = run.get("chair") or {}
+    if chair.get("status") == "failed":
+        if chair.get("error") == "budget reached":
+            return None, ("The chairman stopped at the budget limit, and a retry has the same limit. Convene again "
+                          "with a higher limit; the seats' answers are in the report.")
+        return "chair", ""
+    if not chair and any((run["answers"].get(s["label"]) or {}).get("status") != "ok" for s in run["seats"]):
+        return "stage1", ""
+    return None, "Nothing in this run failed in a way a retry can fix."
+
+
+def reopen(run: dict[str, Any], swaps: Optional[dict[str, dict[str, str]]] = None) -> dict[str, Any]:
+    """Reopen a failed run so committee_advance runs only what failed: the seats without an answer, or the
+    chairman. The answers that came in are kept, and what the first attempt spent stays in the cost.
+
+    ``swaps``: {seat name or label: {"provider", "model"}} gives a failed seat another model for the retry
+    (empty strings: Hermes's main model). Its first model is kept in ``seat["was"]`` and both reports say so.
+    Raises ValueError with a plain reason when the run cannot be retried."""
+    target, why = retry_target(run)
+    if not target:
+        raise ValueError(why)
+    failed = [s for s in run["seats"] if (run["answers"].get(s["label"]) or {}).get("status") != "ok"]
+    swapped: dict[str, str] = {}
+    for key, new in (swaps or {}).items():
+        seat = next((s for s in run["seats"] if key in (s["name"], s["label"])), None)
+        if seat is None:
+            raise ValueError(f"No seat called {key!r} in this run.")
+        if target != "stage1" or seat not in failed:
+            raise ValueError(f"{seat['name']} answered, so its model is not changed by a retry.")
+        new = {"provider": str((new or {}).get("provider") or "").strip(),
+               "model": str((new or {}).get("model") or "").strip()}
+        if (new["provider"], new["model"]) == (seat.get("provider") or "", seat.get("model") or ""):
+            continue
+        seat.setdefault("was", {"provider": seat.get("provider") or "", "model": seat.get("model") or ""})
+        swapped[seat["name"]] = f"{model_label(seat)} → {model_label(new)}"
+        seat["provider"], seat["model"] = new["provider"], new["model"]
+        seat.pop("price", None)                       # re-priced for the new model before the run continues
+    who = [s["name"] for s in failed] if target == "stage1" else ["Chairman"]
+    errors = {s["name"]: (run["answers"].get(s["label"]) or {}).get("error") for s in failed} if target == "stage1" \
+        else {"Chairman": (run.get("chair") or {}).get("error")}
+    run.setdefault("retries", []).append({"t": _now(), "stage": target, "who": who, "swapped": swapped,
+                                          "errors": {k: _clip(str(v or ""), 160) for k, v in errors.items()}})
+    if target == "stage1":
+        for s in failed:
+            run["answers"].pop(s["label"], None)
+            (run.get("switched") or {}).pop(s["name"], None)
+    else:
+        run["chair"] = None
+    lim = run.get("limits") or {}
+    run["deadline"] = (_now() + lim["max_secs"]) if lim.get("max_secs") else None   # a fresh time window
+    run["status"], run["next_stage"], run["error"] = "open", target, None
+    run.pop("live", None)
+    run["timeline"].append({"t": _now(), "event": "retry", "stage": target, "who": who})
+    return {"stage": target, "who": who, "swapped": swapped}
 
 
 # ── Stage 2 ─────────────────────────────────────────────────────────────────
@@ -936,20 +1094,51 @@ def parse_text_ranking(text: str) -> list[str]:
 
 
 def aggregate(reviews: dict[str, dict[str, Any]], labels: list[str]) -> list[dict[str, Any]]:
+    """Average place and first-place votes from the blind ballots, without self-votes.
+
+    Each reviewer ranks every answer, its own included, without knowing which is its own. Its own answer is
+    then taken off its ballot and the rest re-numbered, so a seat's place comes only from the other seats
+    (models tend to prefer their own style). Places run from 1 to ``of`` (the answers minus one). The full
+    ballots stay in ``run["reviews"]`` and the reports still show them, own answer shaded."""
     pos: dict[str, list[int]] = {lab: [] for lab in labels}
     firsts = {lab: 0 for lab in labels}
-    for r in reviews.values():
+    of = 0
+    for who, r in reviews.items():
         if r.get("status") != "ok":
             continue
-        for i, lab in enumerate(r["ranking"]):
-            if lab in pos:
-                pos[lab].append(i + 1)
-        if r["ranking"]:
-            firsts[r["ranking"][0]] = firsts.get(r["ranking"][0], 0) + 1
-    rows = [{"label": lab, "avg_rank": sum(p) / len(p), "first_votes": firsts[lab], "votes": len(p)}
+        others = [lab for lab in r["ranking"] if lab != who and lab in pos]
+        of = max(of, len(others))
+        for i, lab in enumerate(others):
+            pos[lab].append(i + 1)
+        if others:
+            firsts[others[0]] += 1
+    rows = [{"label": lab, "avg_rank": sum(p) / len(p), "first_votes": firsts[lab], "votes": len(p), "of": of}
             for lab, p in pos.items() if p]
     rows.sort(key=lambda r: (r["avg_rank"], -r["first_votes"], r["label"]))
     return rows
+
+
+def _tie_key(r: dict[str, Any]) -> tuple:
+    return (round(r["avg_rank"], 6), r["first_votes"])
+
+
+def places(ranking: list[dict[str, Any]]) -> dict[str, int]:
+    """Each answer's place in the vote; answers with the same average place and first votes share it."""
+    out: dict[str, int] = {}
+    for i, r in enumerate(ranking):
+        out[r["label"]] = out[ranking[i - 1]["label"]] if i and _tie_key(r) == _tie_key(ranking[i - 1]) else i + 1
+    return out
+
+
+def self_votes_left_out(run: dict[str, Any]) -> bool:
+    """Runs from 0.4.9 on leave self-votes out of the places; older stored rankings include them."""
+    rk = run.get("ranking") or []
+    return bool(rk) and "of" in rk[0]
+
+
+def clear_first(ranking: list[dict[str, Any]]) -> bool:
+    """True when one answer placed first on its own (not tied for first)."""
+    return bool(ranking) and (len(ranking) == 1 or _tie_key(ranking[0]) != _tie_key(ranking[1]))
 
 
 def run_review(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress: Progress,
@@ -1093,10 +1282,75 @@ def _norm_chair(parsed: Optional[dict], raw: str) -> dict[str, Any]:
             **_norm_actions(parsed),
             "change_from_earlier": str(parsed.get("change_from_earlier") or "").strip(),
             "executive_summary": _norm_exec(parsed.get("executive_summary")),
+            **_norm_defer(parsed.get("defer")),
             "disputes_resolved": [{"dispute": str(x.get("dispute") or "").strip(),
                                    "decided": str(x.get("decided") or "").strip(),
                                    "by_argument": str(x.get("by_argument") or "").strip()}
                                   for x in parsed.get("disputes_resolved") or [] if isinstance(x, dict)]}
+
+
+def _same_text(a: str, b: str) -> bool:
+    k = lambda s: re.sub(r"[^a-z0-9]+", " ", str(s).lower()).strip()   # noqa: E731
+    return k(a) == k(b)
+
+
+def _norm_defer(d: Any) -> dict[str, Any]:
+    """{'defer': {...}} when the chairman deferred within the rule, {'defer_refused': why} when it tried to
+    defer outside it (its decision then stands as written), else {}. The rule is checked in code: one named
+    fact, and two different decisions for its two answers."""
+    if not isinstance(d, dict):
+        return {}
+    v = {k: str(d.get(k) or "").strip() for k in ("needed", "how_to_find", "if_yes", "if_no")}
+    if not v["needed"]:
+        return {}
+    if not v["if_yes"] or not v["if_no"]:
+        return {"defer_refused": f"it would wait for one fact ({v['needed']}) but did not give a decision for "
+                                 "each answer"}
+    if _same_text(v["if_yes"], v["if_no"]):
+        return {"defer_refused": f"it would wait for one fact ({v['needed']}) but gave the same decision either "
+                                 "way, so that fact does not change it"}
+    return {"defer": v}
+
+
+COVER_WARN = "The verdict does not address "
+
+
+def uncovered(run: dict[str, Any]) -> list[dict[str, Any]]:
+    """Points still disputed after the debate that the verdict leaves out entirely: no ruling on them in
+    disputes_resolved, their id (D2) not mentioned, and under half of the point's words anywhere in it."""
+    d, chair = run.get("deliberation") or {}, run.get("chair") or {}
+    if chair.get("status") != "ok" or not d.get("open"):
+        return []
+    ruled = set(match_resolved(chair.get("disputes_resolved") or [], d.get("disputes") or []))
+    text = " ".join(str(x) for x in (chair.get("final_answer"), chair.get("decision"),
+                                     *(chair.get("open_questions") or []),
+                                     *[x.get("view", "") for x in chair.get("dissent") or []]))
+    have = _words(text)
+    out = []
+    for p in d.get("disputes") or []:
+        if p["id"] not in d["open"] or p["id"] in ruled or re.search(rf"\b{p['id']}\b", text):
+            continue
+        words = _words(p["point"])
+        if words and len(words & have) / len(words) >= 0.5:
+            continue
+        out.append(p)
+    return out
+
+
+def note_verdict_checks(run: dict[str, Any]) -> None:
+    """Keep the coverage and deferral warnings up to date after the verdict (warnings only)."""
+    miss = uncovered(run)
+    run["coverage"] = {"missing": [p["id"] for p in miss]}
+    keep = [w for w in run.get("warnings") or [] if not w.startswith((COVER_WARN, DEFER_WARN))]
+    keep += [f"{COVER_WARN}{p['id']}: {p['point']} The seats still disagreed on it after the debate."
+             for p in miss]
+    why = (run.get("chair") or {}).get("defer_refused")
+    if why:
+        keep.append(f"{DEFER_WARN}{why}. Its decision is shown as written.")
+    run["warnings"] = keep
+
+
+DEFER_WARN = "The chairman tried to defer, but "
 
 
 def run_chair(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress: Progress) -> None:
@@ -1229,12 +1483,50 @@ def _side_of(dispute: dict[str, Any], seat: str) -> str:
     return next((p["side"] for p in dispute["positions"] if p["seat"] == seat), "")
 
 
+def _json_in(raw: str) -> Optional[dict]:
+    """The JSON object in a plain-text reply (bare, or inside a ``` fence), or None."""
+    import json
+    s = str(raw or "").strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", s, re.S)
+    if m:
+        s = m.group(1).strip()
+    i, j = s.find("{"), s.rfind("}")
+    if i < 0 or j <= i:
+        return None
+    try:
+        v = json.loads(s[i:j + 1])
+    except ValueError:
+        return None
+    return v if isinstance(v, dict) else None
+
+
+# A model answering in plain text often still writes JSON, in its own words: "points" for "responses",
+# "point" for "dispute", "side_tag" for "side". Read those too, or the whole reply is lost.
+_REPLY_LISTS = ("responses", "points", "replies", "disputes", "answers")
+_REPLY_KEYS = {"dispute": ("dispute", "point", "id", "dispute_id"), "side": ("side", "side_tag", "tag", "position"),
+               "argument": ("argument", "reason", "because", "rationale"), "stance": ("stance",),
+               "evidence": ("evidence", "sources", "citations")}
+
+
+def _reply_items(parsed: dict) -> list[dict]:
+    items = next((parsed[k] for k in _REPLY_LISTS if isinstance(parsed.get(k), list)), [])
+    out = []
+    for x in items:
+        if isinstance(x, dict):
+            out.append({k: next((x[a] for a in names if x.get(a) not in (None, "")), None)
+                        for k, names in _REPLY_KEYS.items()})
+    return out
+
+
 def _norm_reply(parsed: Optional[dict], raw: str, disputes: list[dict[str, Any]], seat: str) -> dict[str, Any]:
     by_id = {d["id"]: d for d in disputes}
+    salvaged = False
+    if parsed is None and raw.strip():
+        found = _json_in(raw)
+        if found is not None and _reply_items(found):
+            parsed, salvaged = found, True
     resp = []
-    for x in (parsed or {}).get("responses") or []:
-        if not isinstance(x, dict):
-            continue
+    for x in _reply_items(parsed or {}):
         did = str(x.get("dispute") or "").strip().upper()
         if did not in by_id or did in {r["dispute"] for r in resp}:
             continue
@@ -1246,12 +1538,21 @@ def _norm_reply(parsed: Optional[dict], raw: str, disputes: list[dict[str, Any]]
             side = _side_of(by_id[did], seat) if stance == "hold" else (str(x.get("side") or "").strip()[:60] or "other")
         resp.append({"dispute": did, "stance": stance, "side": side,
                      "argument": str(x.get("argument") or "").strip(),
-                     "evidence": [str(e).strip() for e in x.get("evidence") or [] if str(e).strip()][:8]})
+                     "evidence": [str(e).strip() for e in (x.get("evidence") if isinstance(x.get("evidence"), list)
+                                                           else [x.get("evidence") or ""]) if str(e).strip()][:8]})
     if parsed is None and raw.strip():
+        if raw.strip().startswith(("{", "```")):
+            # JSON the plugin cannot read: storing it as the "position" told the chairman a seat had replied
+            raise RuntimeError("unreadable reply: the model wrote JSON in a shape the plugin could not read")
         return {"responses": [], "updated_position": _clip(raw.strip(), 400), "confidence": None, "fallback": True}
+    if not resp and not str((parsed or {}).get("updated_position") or "").strip():
+        # nothing to read: counting it as a reply told the chairman a seat had spoken when it had not
+        raise RuntimeError("empty reply: the model wrote no response to the disputes and no position "
+                           "(often a thinking model that used its whole output allowance)")
     conf = parsed.get("confidence") if parsed else None
-    return {"responses": resp, "updated_position": str((parsed or {}).get("updated_position") or "").strip(),
-            "confidence": conf if isinstance(conf, (int, float)) else None}
+    pos = (parsed or {}).get("updated_position") or (parsed or {}).get("position") or ""
+    return {"responses": resp, "updated_position": str(pos if isinstance(pos, str) else "").strip(),
+            "confidence": conf if isinstance(conf, (int, float)) else None, **({"fallback": True} if salvaged else {})}
 
 
 def _current_side(d: dict[str, Any], rounds_: list[dict[str, Any]], seat: str) -> str:
@@ -1272,6 +1573,36 @@ def open_disputes(delib: dict[str, Any]) -> list[dict[str, Any]]:
         sides = {_current_side(d, delib["rounds"], s) for s in seats} - {""}
         if len(sides) > 1:
             out.append(d)
+    return out
+
+
+def stalled(run: dict[str, Any], delib: dict[str, Any], ids: list[str]) -> list[str]:
+    """Of these open disputes, the ones where the last round changed nothing: at least one member replied on it,
+    nobody changed side or conceded, and no reply on it cited a source that member had not cited before. Another
+    round there would only repeat the same arguments, so it is skipped. A dispute nobody managed to reply on is
+    not stalled: the round taught nothing about it."""
+    from .citations import _ids_in
+    if not delib["rounds"]:
+        return []
+    last, before = delib["rounds"][-1], delib["rounds"][:-1]
+    labels = {s["name"]: s["label"] for s in run.get("seats") or []}
+    out = []
+    for did in ids:
+        replied = moved = False
+        for seat, rep in last["replies"].items():
+            if rep.get("status") != "ok":
+                continue
+            for x in rep.get("responses") or []:
+                if x.get("dispute") != did:
+                    continue
+                replied = True
+                had = set(_ids_in(((run.get("answers") or {}).get(labels.get(seat, "")) or {})))
+                for r in before:
+                    had |= set(_ids_in((r["replies"].get(seat) or {}).get("responses") or []))
+                if x.get("stance") in ("change", "partly") or set(_ids_in(x)) - had:
+                    moved = True
+        if replied and not moved:
+            out.append(did)
     return out
 
 
@@ -1312,20 +1643,47 @@ def match_resolved(resolved: list[dict[str, Any]], disputes: list[dict[str, Any]
     return out
 
 
-def moves(delib: dict[str, Any]) -> list[dict[str, Any]]:
-    """Who changed their mind, on which point, and the argument they gave (computed, not asked)."""
+def moves(delib: dict[str, Any], run: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
+    """Who changed their mind, on which point, and the argument they gave (computed, not asked).
+
+    A change of side is marked ``unbacked`` when the side it moved to was already held by most of the other
+    members and the reply cites no evidence the member had not cited before (in its answer or earlier
+    replies). That is the known failure of AI debates: models give in to the majority, and a correct member
+    standing alone is the most likely to. ``alone``: no other member shared the side it left. A move toward a
+    minority, or one that brings a source the member had not used, is not marked."""
+    from .citations import _ids_in
     out = []
+    labels = {s["name"]: s["label"] for s in (run or {}).get("seats") or []}
     for d in delib["disputes"]:
+        seats = [p["seat"] for p in d["positions"]]
         for p in d["positions"]:
             seat, start = p["seat"], p["side"]
             for n, rnd in enumerate(delib["rounds"], 1):
                 for x in (rnd["replies"].get(seat) or {}).get("responses") or []:
                     if x["dispute"] == d["id"] and x["stance"] in ("change", "partly"):
-                        out.append({"seat": seat, "dispute": d["id"], "round": n, "stance": x["stance"],
-                                    "from": start, "to": x["side"], "because": x["argument"],
-                                    "kept_side": x["side"] == start})   # a concession, not a change of side
+                        m = {"seat": seat, "dispute": d["id"], "round": n, "stance": x["stance"],
+                             "from": start, "to": x["side"], "because": x["argument"],
+                             "kept_side": x["side"] == start}   # a concession, not a change of side
+                        if run is not None and not m["kept_side"]:
+                            before = delib["rounds"][:n - 1]
+                            others = [s for s in seats if s != seat]
+                            sides = [_current_side(d, before, s) for s in others]
+                            majority = bool(others) and 2 * sides.count(x["side"]) > len(others)
+                            had = set(_ids_in(((run.get("answers") or {}).get(labels.get(seat, "")) or {})))
+                            for r in before:
+                                had |= set(_ids_in((r["replies"].get(seat) or {}).get("responses") or []))
+                            new = [i for i in _ids_in(x) if i not in had]
+                            m["unbacked"] = majority and not new
+                            m["alone"] = start not in sides
+                            m["new_evidence"] = new
+                        out.append(m)
                         start = x["side"]
     return out
+
+
+def unbacked(run: dict[str, Any]) -> list[dict[str, Any]]:
+    """The side changes to the majority with no new evidence (see ``moves``)."""
+    return [m for m in (run.get("deliberation") or {}).get("moves") or [] if m.get("unbacked")]
 
 
 def _delib_skip(run: dict[str, Any], why: str, progress: Progress, note: str) -> None:
@@ -1383,6 +1741,11 @@ def run_deliberate(run: dict[str, Any], llm: LLM, cancel: threading.Event, progr
     debaters = [names[a["name"]] for a in answers]
     for n in range(1, pricing.rounds(run) + 1):
         todo = delib["disputes"] if n == 1 else open_disputes(delib)
+        if n > 1 and todo:
+            stuck = stalled(run, delib, [d["id"] for d in todo])
+            if stuck:
+                delib["stalled"] = stuck
+                todo = [d for d in todo if d["id"] not in stuck]
         if not todo:
             break
         if not _fit_usd(run, cancel, progress, lambda n=n: pricing.round_calls(run, n_round=n) + [pricing.chair_call(run)],
@@ -1414,6 +1777,7 @@ def run_deliberate(run: dict[str, Any], llm: LLM, cancel: threading.Event, progr
             done[0] += 1
             run["live"]["done"][key] = ok
             if ok:
+                run["live"].setdefault("replied_at", {})[key] = _now()
                 run["live"].setdefault("replies", {})[key] = [
                     {"dispute": x.get("dispute"), "stance": x.get("stance")} for x in got[key][1].get("responses") or []]
             progress(f"Deliberation · round {n} · {done[0]}/{len(debaters)} replies in")
@@ -1429,7 +1793,7 @@ def run_deliberate(run: dict[str, Any], llm: LLM, cancel: threading.Event, progr
         run["timeline"].append({"t": _now(), "event": "deliberate_round", "round": n,
                                 "replies": sum(1 for r in replies.values() if r["status"] == "ok"),
                                 "of": len(debaters)})
-    delib["moves"] = moves(delib)
+    delib["moves"] = moves(delib, run)
     delib["open"] = [d["id"] for d in open_disputes(delib)]
     run["status"], run["next_stage"] = "deliberated", "chair"
 
@@ -1456,6 +1820,13 @@ def advance(run: dict[str, Any], llm: LLM, cancel: threading.Event, progress: Pr
             run_deliberate(run, llm, cancel, progress)
         else:
             run_chair(run, llm, cancel, progress)
+        if stage in ("stage1", "deliberate", "chair"):       # new text with citations in it: check them
+            from .citations import audit
+            audit(run)
+        if stage == "chair":
+            from .config import note_chair_overlap
+            note_chair_overlap(run)
+            note_verdict_checks(run)
     except Cancelled:
         run["status"], run["next_stage"] = "cancelled", None
         run["timeline"].append({"t": _now(), "event": "cancelled", "during": stage})

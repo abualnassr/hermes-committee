@@ -95,6 +95,8 @@ function useNow(active, ms = 250) {
 // ── helpers ────────────────────────────────────────────────────────────────
 
 const shortModel = m => (m ? String(m).replace(/^.*\//, '').replace(/\[[^\]]*\]$/, '') : '')
+// 'active model', plus the model that really answered when the run knows it (e.g. a seat given the main model on a retry)
+const activeAs = (run, who) => run?.active_as?.[who] ? `active model (${shortModel(run.active_as[who])})` : 'active model'
 const pcolor = p => PROVIDER_COLORS[p] || profileColor(p || 'active') || 'var(--ui-accent)'
 const initials = r => String(r || '?').split(/[\s&/]+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase()
 
@@ -552,7 +554,7 @@ function ArcStage({ run, sn }) {
           sn.stage === 'research' ? h('rect', { className: 'hc-bscan', x: -BW / 2, y: -BH / 2, width: 34, height: BH }) : null),
         makerOf(run.chairman?.model, run.chairman?.provider) ? h(Logo, { mk: makerOf(run.chairman?.model, run.chairman?.provider), size: 18, x: -72, y: -21, className: 'hc-blogo' }) : null,
         h('text', { className: 'hc-btitle', y: -4, x: makerOf(run.chairman?.model, run.chairman?.provider) ? 12 : 0 }, makerOf(run.chairman?.model, run.chairman?.provider) ? 'CHAIRMAN' : '⚖  CHAIRMAN'),
-        h('text', { className: 'hc-bsub', y: 17 }, fit(shortModel(run.chairman?.model) || 'active model', 34)),
+        h('text', { className: 'hc-bsub', y: 17 }, fit(shortModel(run.chairman?.model) || activeAs(run, 'Chairman'), 34)),
         h('text', { className: 'hc-bstat', y: BH / 2 + 24 }, chairStatus),
         decision ? lines2(`“${decision}”`, 78).map((t, j) => h('text', { key: `v${j}`, className: 'hc-bverdict', y: BH / 2 + 52 + j * 22 }, t)) : null),
       seats.map((s, i) => {
@@ -584,7 +586,7 @@ function ArcStage({ run, sn }) {
             h('text', { className: 'hc-let' }, s.label)),
           h('text', { className: 'hc-lbl', textAnchor: 'middle', y: -(R + 34) }, masked ? `Response ${s.label}` : `(${s.label}) ${fit(s.name, chars - 4)}`),
           servedBy(run, s.name) ? h('text', { className: 'hc-sub hc-swsub', textAnchor: 'middle', y: -(R + 14) }, h('title', null, swTitle(servedBy(run, s.name), s)), fit(`↺ ${shortModel(servedBy(run, s.name).model)}`, chars + 2))
-            : h('text', { className: 'hc-sub', textAnchor: 'middle', y: -(R + 14) }, fit(shortModel(s.model) || 'active model', chars + 2)),
+            : h('text', { className: 'hc-sub', textAnchor: 'middle', y: -(R + 14) }, fit(shortModel(s.model) || activeAs(run, s.name), chars + 2)),
           h('text', { className: 'hc-stance', textAnchor: 'middle', y: R + 27 }, fit(status, Math.max(chars + 6, 30))),
           h('text', { className: 'hc-tk', textAnchor: 'middle', y: R + 46 }, S.tokens ? `${fmtNum(S.tokens)} tok` : ''))
       }),
@@ -778,7 +780,7 @@ const blank = (name = '') => ({ name, instructions: '', provider: '', model: '' 
 const clean = s => Object.fromEntries(Object.entries({ provider: s.provider, model: s.model }).filter(([, v]) => v))
 
 function fromRoster(r) {
-  return { template: r.template, review: r.review !== false, research: !!r.research, research_secs: r.research_secs || 90, ...(r.deliberate ? { deliberate: r.deliberate, rounds: r.deliberate_rounds || 1 } : {}),
+  return { template: r.template, review: r.review !== false, research: !!r.research, solo: !!r.solo, research_secs: r.research_secs || 90, ...(r.deliberate ? { deliberate: r.deliberate, rounds: r.deliberate_rounds || 1 } : {}),
     chairGuidance: r.chairman_guidance || undefined, decision: typeof r.decision_focus === 'boolean' ? r.decision_focus : undefined,
     chairman: { provider: r.chairman?.provider || '', model: r.chairman?.model || '', ...(r.chairman?.thinking ? { thinking: r.chairman.thinking } : {}) },
     seats: (r.seats || []).map(s => ({ name: s.name || '', instructions: s.instructions || '', provider: s.provider || '', model: s.model || '',
@@ -786,12 +788,37 @@ function fromRoster(r) {
     ...(r.max_minutes != null ? { maxMinutes: r.max_minutes } : {}), ...(r.max_usd != null ? { maxUsd: r.max_usd } : {}) }
 }
 
+// Chairman alone: one more answer, from the chairman, shown beside the verdict.
+function SoloSwitch({ state, upd }) {
+  return h('div', { className: 'hc-research' },
+    h('button', { className: `hc-sw${state.solo ? ' hc-on' : ''}`, role: 'switch', 'aria-checked': !!state.solo, title: 'Chairman alone',
+      onClick: () => upd({ solo: !state.solo }) }),
+    h('div', null, h('b', { className: 'hc-sm' }, '⚖ Chairman alone'),
+      h('div', { className: 'hc-xs hc-muted' }, 'The chairman also answers by itself, while the seats answer. The Decision page shows its answer next to the committee’s verdict, so you can see what the committee changed. It never sees its own answer when it writes the verdict.'),
+      h('div', { className: 'hc-xs hc-muted' }, h('b', null, 'When to use it: '), 'to check whether the committee is worth it for a kind of question. If the two keep matching, one model may be enough.'),
+      state.solo ? h('div', { className: 'hc-xs hc-warn-t' }, '1 extra call on the chairman’s model. No extra time.') : null))
+}
+
+function SoloCompare({ run }) {
+  const s = run.solo_compare
+  if (!s) return null
+  if (!s.ok) return h('div', { className: 'hc-swnote', role: 'note' }, h('b', null, '⚖ Chairman alone: '), `its own answer did not come in (${s.error}). The verdict is unaffected.`)
+  const pct = typeof s.confidence === 'number' ? ` · ${Math.round(s.confidence * 100)}%` : ''
+  return h('div', { className: 'hc-solo', style: { marginTop: 12 } },
+    h('div', { className: 'hc-sm', style: { fontWeight: 600 } }, '⚖ Chairman alone vs the committee'),
+    h('div', { className: 'hc-xs hc-muted', style: { marginBottom: 6 } }, `Before reading the committee, ${s.model} answered by itself. It did not see this when writing the verdict.`),
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 8 } },
+      h('div', { className: 'hc-card', style: { padding: 10 } }, h('div', { className: 'hc-xs hc-muted' }, `On its own${pct}`), h('div', { className: 'hc-sm' }, s.summary || s.answer)),
+      h('div', { className: 'hc-card', style: { padding: 10 } }, h('div', { className: 'hc-xs hc-muted' }, `With the committee${s.verdict_confidence ? ' · ' + s.verdict_confidence : ''}`), h('div', { className: 'hc-sm' }, s.verdict || 'No verdict'))))
+}
+
+
 const QUICK_USD = [0.5, 1, 2, 5]
 const COMMITTEE_NAME = /^[\p{L}\p{N}][\p{L}\p{N}_ .()&+\-]{0,39}$/u
 
 // A saved committee from a run: seats, models, instructions, photo settings, chairman and limits.
 function presetFromRun(run) {
-  return { template: run.template, review: run.review !== false, research: !!run.research, deliberate: run.deliberate || 'never', deliberate_rounds: run.deliberate_rounds || 1,
+  return { template: run.template, review: run.review !== false, research: !!run.research, solo: !!run.solo, deliberate: run.deliberate || 'never', deliberate_rounds: run.deliberate_rounds || 1,
     ...(run.custom_brief ? { chairman_guidance: run.chairman_guidance, decision_focus: !!run.decision_focus } : {}),
     max_minutes: run.limits?.max_secs ? Math.round(run.limits.max_secs / 60) : 0, max_usd: run.limits?.max_usd || 0,
     chairman: Object.fromEntries(Object.entries({ provider: run.chairman?.provider, model: run.chairman?.model, thinking: run.chairman?.thinking }).filter(([, v]) => v)),
@@ -1145,7 +1172,8 @@ function EvidencePanel({ state, upd, caps, stats }) {
             title: v === 240 ? 'Thorough: up to 6 + 6 searches, 14 pages and 16 passages instead of 4 + 4, 8 and 8. When to use it: a choice where missing one option would matter (for example the current best models or products). Costs about twice the tokens per seat.'
               : 'Research stops at this point and the committee goes on with what it found (your source review does not count)', onClick: () => upd({ research_secs: v }) }, l))) : null,
         state.research ? h('div', { className: 'hc-xs hc-warn-t' }, 'Your question (not your files) is sent to your web search provider. 3 extra calls on the chairman’s model and ',
-          (state.research_secs || 90) >= 240 ? '~4,600 more tokens for each seat (Thorough).' : '~2,300 more tokens for each seat.') : null)))
+          (state.research_secs || 90) >= 240 ? '~4,600 more tokens for each seat (Thorough).' : '~2,300 more tokens for each seat.') : null)),
+    h(SoloSwitch, { state, upd }))
 }
 
 function SetupView({ setup, models, onConvened, openHelp }) {
@@ -1212,7 +1240,7 @@ function SetupView({ setup, models, onConvened, openHelp }) {
   const customBrief = chairGuidance.trim() !== (tplNow.chairman_guidance || '').trim() || decision !== !!tplNow.decision_focus
   const delib = state.deliberate || L.deliberate_default || 'material'
   const rounds = state.rounds === 2 ? 2 : 1
-  const estBody = JSON.stringify({ question: state.question || '?', evidence: state.evidence, template: state.template, review: state.review, research: !!state.research, research_secs: state.research_secs || 90,
+  const estBody = JSON.stringify({ question: state.question || '?', evidence: state.evidence, template: state.template, review: state.review, research: !!state.research, solo: !!state.solo, research_secs: state.research_secs || 90,
     deliberate: delib, deliberate_rounds: rounds, chairman_guidance: chairGuidance, decision_focus: decision,
     chairman: state.chairman, max_usd: maxUsd, seats: state.seats.map(s => ({ name: s.name.trim() || 'Seat', instructions: s.instructions, provider: s.provider, model: s.model })),
     ...(stats.on.length && state.pack ? { evidence_pack: state.pack, evidence_files: stats.on.map(f => f.fid) } : {}) })
@@ -1229,7 +1257,7 @@ function SetupView({ setup, models, onConvened, openHelp }) {
     if (problems.length) { notify('warning', problems[0]); if (!state.question.trim()) qRef.current?.focus(); return }
     setBusy(true); setGate(null)
     try {
-      const body = { question: state.question, title: (state.title || '').trim(), evidence: state.evidence, template: state.template, review: state.review, research: !!state.research, research_secs: state.research_secs || 90,
+      const body = { question: state.question, title: (state.title || '').trim(), evidence: state.evidence, template: state.template, review: state.review, research: !!state.research, solo: !!state.solo, research_secs: state.research_secs || 90,
         deliberate: delib, deliberate_rounds: rounds, chairman_guidance: chairGuidance, decision_focus: decision, chairman: state.chairman, max_minutes: maxMin,
         max_usd: maxUsd, allow_unknown_price: unknownOk,
         seats: state.seats.map(s => ({ name: s.name.trim(), instructions: s.instructions.trim(), provider: s.provider, model: s.model,
@@ -1249,7 +1277,7 @@ function SetupView({ setup, models, onConvened, openHelp }) {
     name = (name || '').trim()
     if (!COMMITTEE_NAME.test(name)) { notify('warning', 'Give the committee a name: up to 40 characters, starting with a letter or digit.'); return }
     try {
-      const preset = { template: state.template, review: state.review, research: !!state.research, research_secs: state.research_secs || 90, deliberate: delib, deliberate_rounds: rounds,
+      const preset = { template: state.template, review: state.review, research: !!state.research, solo: !!state.solo, research_secs: state.research_secs || 90, deliberate: delib, deliberate_rounds: rounds,
         ...(customBrief ? { chairman_guidance: chairGuidance, decision_focus: decision } : {}), max_minutes: maxMin, max_usd: maxUsd, chairman: { ...clean(state.chairman), ...(state.chairman.thinking ? { thinking: state.chairman.thinking } : {}) },
         seats: state.seats.map(s => ({ name: s.name.trim(), instructions: s.instructions.trim(), ...clean(s), ...(typeof s.vision === 'boolean' ? { vision: s.vision } : {}), ...(s.thinking ? { thinking: s.thinking } : {}) })) }
       const r = await rest('/presets', { method: 'POST', body: { name, preset } })
@@ -1714,6 +1742,40 @@ function StagesPanel({ run, sn, live, replay, stopping, onStop, onReplay, onEndR
     replay ? h('div', { className: 'hc-xs hc-muted hc-ctlnote' }, 'Rebuilt from the saved record: timings, ballots and positions as they happened.') : null)
 }
 
+// Retry a run that stopped without a verdict: only the failed seats (or the chairman) are asked again; the
+// answers that came in are kept. A failed seat can switch to Hermes's main model, the usual fix when its
+// provider has no key, no credit or a daily cap. The page stores the choice; the chat applies it.
+function RetryBox({ run }) {
+  const [main, setMain] = useState({})
+  const [busy, setBusy] = useState(false)
+  const chair = run.retry.stage === 'chair'
+  const failed = chair ? [] : (run.seats || []).filter(s => run.answers?.[s.label]?.status !== 'ok')
+  const go = async () => {
+    setBusy(true)
+    try {
+      const r = await rest(`/runs/${encodeURIComponent(run.id)}/retry`, { method: 'POST', body: { main: failed.filter(s => main[s.name]).map(s => s.name) } })
+      if (!r.ok) { notify('warning', r.error || 'This run cannot be retried.'); return }
+      const where = await startInBackground(r.message, `Retry · ${run.title || run.question.slice(0, 50)}`, run.question)
+      notify(where === 'background' ? 'success' : 'info', where === 'background'
+        ? `Retrying ${r.who}. The answers that came in are kept.`
+        : 'The retry request is in a new chat. Press Enter there if it has not started.')
+    } catch (e) { notify('error', `Could not retry: ${e.message || e}`) } finally { setBusy(false) }
+  }
+  return h('div', { className: 'hc-retry', style: { marginTop: 12 } },
+    h('div', { className: 'hc-xs hc-muted', style: { marginBottom: 6 } }, chair
+      ? 'Retry runs the chairman again on the same answers.'
+      : 'Retry asks again only the seats that failed. The answers that came in are kept, and so is what the first try cost.'),
+    ...failed.map(s => h('label', { key: s.label, className: 'hc-row hc-sm', style: { gap: 6, marginBottom: 4 } },
+      h('input', { type: 'checkbox', checked: !!main[s.name], onChange: e => setMain(m => ({ ...m, [s.name]: e.target.checked })) }),
+      h('span', null, h('b', null, s.name), ` · use Hermes's main model instead of ${s.model || 'its model'}`))),
+    h('button', { className: `hc-convene${busy ? ' hc-busy' : ''}`, disabled: busy, onClick: go, style: { marginTop: 6 } },
+      busy ? busyLabel('Retrying…') : chair ? '🔁 Retry the chairman' : `🔁 Retry ${failed.length === 1 ? failed[0].name : `${failed.length} failed seats`}`))
+}
+
+// How good a place is, 0..1. Places run 1..x.of (the answers minus one: self-votes are left out); runs from
+// before 0.4.9 have no x.of and ran 1..k.
+const rankFrac = (x, k) => { const m = Math.max(2, x.of || k); return Math.max(0, (m - x.avg_rank) / (m - 1)) }
+
 function NowPanel({ run, sn, onDecision }) {
   const n = (run.seats || []).length
   const answered = Object.values(sn.seats).filter(s => s.a === 'ok').length
@@ -1730,7 +1792,8 @@ function NowPanel({ run, sn, onDecision }) {
       h('button', { className: 'hc-convene hc-see', onClick: onDecision }, 'See the decision →')]
   } else if (sn.stage === 'stopped') {
     body = [K(run.status === 'cancelled' ? 'Stopped' : run.stale ? 'Abandoned' : 'No verdict'),
-      h('div', { className: 'hc-sm' }, run.error || (run.status === 'cancelled' ? 'The committee was stopped. No further model calls were started.' : 'The chat that ran this committee ended before it finished.'))]
+      h('div', { className: 'hc-sm' }, run.error || (run.status === 'cancelled' ? 'The committee was stopped. No further model calls were started.' : 'The chat that ran this committee ended before it finished.')),
+      run.status === 'failed' && run.retry?.stage ? h(RetryBox, { run }) : null]
   } else if (sn.stage === 'research') {
     body = sn.researching === 'review'
       ? [K('Research first · your review'), big('Untick any source you do not trust.', h('br'), h('span', { className: 'hc-xs hc-muted' }, 'The seats start when you continue.'))]
@@ -1760,14 +1823,14 @@ function NowPanel({ run, sn, onDecision }) {
     const k = Math.max(2, R.length)
     body = [K('Blind ranking'), h('ul', { className: 'hc-ranks' }, R.map((x, i) => h('li', { key: x.label, style: { animationDelay: `${i * 120}ms` } },
       h('b', null, x.label), h('span', { className: 'hc-rname' }, sn.masked ? `Response ${x.label}` : nameOf(run, x.label)),
-      h('span', { className: 'hc-rb', style: { width: `${Math.max(6, ((k - x.avg_rank) / (k - 1)) * 90)}px` } }), h('span', { className: 'hc-xs hc-muted hc-mono' }, x.avg_rank.toFixed(1)))))]
+      h('span', { className: 'hc-rb', style: { width: `${Math.max(6, rankFrac(x, k) * 90)}px` } }), h('span', { className: 'hc-xs hc-muted hc-mono' }, x.avg_rank.toFixed(1)))))]
   } else body = [K('Waiting'), big('The next stage starts in a moment.')]
   return h('div', { className: `hc-panel hc-narr${sn.stage === 'done' || sn.stage === 'stopped' ? ' hc-idle' : ''}` },
     h('div', { className: 'hc-ph' }, 'Now', h('span', { className: 'hc-phr' }, h('span', { className: 'hc-pulse2' }))),
     h('div', { className: 'hc-nb', key: `${sn.stage}-${sn.chair}-${sn.ranked}-${sn.describing}-${sn.researching === 'review'}-${!!run.live?.ask}` }, ...body))
 }
 
-const LANE_CLS = { research: 'web', stage1: 'a', review: 'v', deliberate: 'd', chair: 'c' }
+const LANE_CLS = { research: 'web', stage1: 'a', solo: 'c', review: 'v', deliberate: 'd', chair: 'c' }
 // The axis length: the first round length that fits. It changes only when the run outgrows it, so bars never
 // drift; quarter ticks fall on round times (0:30, 1:00 …).
 const tickStep = need => (need <= 150 ? 30 : need <= 330 ? 60 : need <= 660 ? 120 : need <= 1500 ? 300 : need <= 2400 ? 600 : 900)
@@ -1809,7 +1872,7 @@ function Timeline({ run, sn }) {
       rows.map(r => h('div', { key: r.who, className: 'hc-lane' },
         h('div', { className: 'hc-who' }, h('b', { className: 'hc-ellipsis' }, r.name), h('span', { className: 'hc-live hc-ellipsis' }, liveText(r))),
         h('div', { className: 'hc-rail' }, sn.lanes.filter(b => b.who === r.who).map((b, i) => h('i', { key: i, className: `hc-${LANE_CLS[b.stage] || 'c'}${b.running ? ' hc-running' : ''}`,
-          title: `${{ research: 'Research', stage1: 'Answer', review: 'Blind vote', deliberate: 'Debate', chair: 'Verdict' }[b.stage]} · ${b.running ? 'running' : `${fmtSecs(b.secs)} · ${fmtNum(b.tokens)} tokens`}`,
+          title: `${{ research: 'Research', stage1: 'Answer', solo: 'Answer alone', review: 'Blind vote', deliberate: 'Debate', chair: 'Verdict' }[b.stage]} · ${b.running ? 'running' : `${fmtSecs(b.secs)} · ${fmtNum(b.tokens)} tokens`}`,
           style: { left: pct(b.start), width: pct(Math.max(span * 0.004, b.shown)) } }))),
         h('div', { className: 'hc-tok' }, r.who === 'chair' ? fmtNum(sn.chairLanes.filter(b => !b.running).reduce((x, b) => x + (b.tokens || 0), 0)) : fmtNum(sn.seats[r.who]?.tokens || 0)))),
       sn.live || (sn.replaying && !sn.ended) ? h('div', { className: 'hc-nowline', style: { left: `calc(16px + 170px + (100% - 32px - 242px) * ${Math.min(1, sn.t / span)})` } }) : null),
@@ -1840,7 +1903,7 @@ function Matrix({ run, rows, masked, legend }) {
   const cols = m.cols || []
   if (!cols.length || (!rows.length && run.review && !run.skipped?.review)) return h('div', { className: 'hc-sm hc-muted hc-pb' }, run.review ? (run.skipped?.review ? 'The blind vote was skipped.' : 'Ballots appear here as each seat ranks the others.') : 'This run had no blind vote.')
   const name = l => (masked ? `Response ${l}` : nameOf(run, l))
-  const model = l => shortModel((run.seats || []).find(s => s.label === l)?.model) || 'active model'
+  const model = l => { const s = (run.seats || []).find(x => x.label === l); return shortModel(s?.model) || activeAs(run, s?.name) }
   const key = legend && !masked ? h('div', { className: 'hc-mkey' }, cols.map(c => h('span', { key: c, title: nameOf(run, c) }, h('b', null, c), ' ', model(c)))) : null
   return h(Fragment, null, h('div', { className: 'hc-matrix', style: { gridTemplateColumns: `24px repeat(${cols.length},1fr)` } },
     h('span'), cols.map(c => h('span', { key: `h${c}`, className: 'hc-mh', title: name(c) }, c)),
@@ -1939,7 +2002,7 @@ function SeatAnswer({ run, label, onClose }) {
     h('div', { className: 'hc-row' },
       h('div', { className: 'hc-av', style: { background: pcolor(s.provider) } }, makerOf(servedBy(run, s.name)?.model || s.model, s.provider) ? h(Logo, { mk: makerOf(servedBy(run, s.name)?.model || s.model, s.provider), size: 17 }) : initials(s.name)),
       h('div', { className: 'hc-grow', style: { minWidth: 0 } }, h('b', { className: 'hc-ellipsis', style: { display: 'block' } }, s.name),
-        h('div', { className: 'hc-xs hc-muted hc-ellipsis' }, `${shortModel(s.model) || 'active model'} · ${fmtSecs(run.seconds?.stage1?.[label])}`),
+        h('div', { className: 'hc-xs hc-muted hc-ellipsis' }, `${shortModel(s.model) || activeAs(run, s.name)} · ${fmtSecs(run.seconds?.stage1?.[label])}`),
         servedBy(run, s.name) ? h('div', { className: 'hc-xs hc-warn-t', title: swTitle(servedBy(run, s.name), s) }, `↺ answered by ${shortModel(servedBy(run, s.name).model)} instead`) : null),
       h('button', { className: 'hc-link', onClick: onClose }, '✕')),
     roleFit(run, label) ? h('div', { className: `hc-sm ${roleFit(run, label).fit === 'drifted' ? 'hc-warn-t' : 'hc-muted'}`, dir: 'auto' },
@@ -1986,6 +2049,9 @@ function debateTally(d) {
   return [`${n} point${n === 1 ? '' : 's'} debated`, rounds > 1 ? `${rounds} rounds` : null,
     changed ? `${changed} seat${changed === 1 ? '' : 's'} changed side` : null,
     conceded ? `${conceded} conceded a point` : null, !changed && !conceded ? 'nobody moved' : null,
+    (d.stalled || []).length ? `round 2 skipped ${d.stalled.join(', ')}: no change of side or new evidence there in round 1` : null,
+    moves.some(m => m.unbacked) ? (() => { const w = moves.filter(m => m.unbacked), s = seatsOf(w)
+      return `${s} joined the majority without new evidence${w.length > s ? ` (on ${w.length} points)` : ''}` })() : null,
     open ? `${open} still disputed` : 'all settled'].filter(Boolean)
 }
 function DeliberationTab({ run }) {
@@ -2025,6 +2091,9 @@ function DeliberationTab({ run }) {
         return h('div', { key: pos.seat, className: 'hc-dseat' },
           h('div', { className: 'hc-dsh' }, h('b', null, pos.seat), h('span', { className: `hc-chip hc-static hc-chip-sm ${cls}` }, word)),
           h('div', { className: 'hc-dside' }, pos.side, r && r.side !== pos.side ? ` → ${r.side}` : ''),
+          (() => { const m = [...(d.moves || [])].reverse().find(m => m.seat === pos.seat && m.dispute === p.id && !(m.kept_side ?? m.from === m.to))
+            return m?.unbacked ? h('div', { className: 'hc-xs hc-warn-t', title: 'It moved to the side most others already held and cited no evidence it had not cited before. In AI debates that is often giving in, not being persuaded; the chairman was told to weigh its original position.' },
+              `⚑ joined the majority without new evidence${m.alone ? ' (had stood alone)' : ''}`) : null })(),
           lead ? h('p', { className: 'hc-dlead' }, withTags(lead)) : null,
           rest.length && full[p.id] ? h('ul', { className: 'hc-drest' }, rest.map((t, i) => h('li', { key: i }, withTags(t)))) : null)
       }),
@@ -2034,7 +2103,9 @@ function DeliberationTab({ run }) {
         decided[p.id].by_argument ? h('div', { className: 'hc-xs hc-muted' }, `Decided by: ${decided[p.id].by_argument}`) : null) : null))),
     (d.moves || []).length ? h('div', { style: { marginTop: 12 } }, h('div', { className: 'hc-lbl' }, 'Who changed their mind'),
       h('ul', { className: 'hc-list hc-sm' }, d.moves.map((m, i) => h('li', { key: i }, h('b', null, m.seat), ` on ${m.dispute} (round ${m.round}): `,
-        (m.kept_side ?? m.from === m.to) ? `kept “${m.from}” but conceded a point. ` : `${m.from} → ${m.to}. `, h('span', { className: 'hc-muted' }, m.because)))))
+        (m.kept_side ?? m.from === m.to) ? `kept “${m.from}” but conceded a point. ` : `${m.from} → ${m.to}. `,
+        m.unbacked ? h('span', { className: 'hc-warn-t' }, `Joined the majority without new evidence${m.alone ? ', after standing alone' : ''}. `) : null,
+        h('span', { className: 'hc-muted' }, m.because)))))
       : h('div', { className: 'hc-sm hc-muted', style: { marginTop: 12 } }, 'Nobody changed position in the debate.'))
 }
 function DecisionView({ run, onReplay, openChat, onFollow, openHelp }) {
@@ -2067,7 +2138,13 @@ function DecisionView({ run, onReplay, openChat, onFollow, openHelp }) {
         run.background ? h('details', { className: 'hc-bg' },
           h('summary', { title: 'Context added to your question before the seats answered. It was sent to every seat’s provider.' }, 'Background given to the seats'),
           h('div', { className: 'hc-xs', dir: 'auto' }, run.background)) : null,
+        c.defer ? h('div', { className: 'hc-chip hc-static hc-warn-t', style: { marginTop: 8 }, title: 'The chairman deferred under a strict rule: one fact nobody has decides it, and the decision differs for each answer.' }, '⏸ Not yet: one fact decides it') : null,
         h('h1', { className: 'hc-h1', dir: 'auto' }, c.decision || '—'),
+        c.defer ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 8, margin: '8px 0' } },
+          h('div', { className: 'hc-card', style: { padding: 10, gridColumn: '1 / -1' } }, h('div', { className: 'hc-xs hc-muted' }, 'Find out'),
+            h('div', { className: 'hc-sm', dir: 'auto' }, c.defer.needed, c.defer.how_to_find ? h('span', { className: 'hc-muted' }, ` · ${c.defer.how_to_find}`) : null)),
+          h('div', { className: 'hc-card', style: { padding: 10 } }, h('div', { className: 'hc-xs hc-muted' }, 'If yes'), h('div', { className: 'hc-sm', dir: 'auto' }, c.defer.if_yes)),
+          h('div', { className: 'hc-card', style: { padding: 10 } }, h('div', { className: 'hc-xs hc-muted' }, 'If no'), h('div', { className: 'hc-sm', dir: 'auto' }, c.defer.if_no))) : null,
         run.exec?.bottom_line ? h('p', { className: 'hc-bl', dir: 'auto', title: run.exec.assembled ? 'Taken from the chairman’s answer (this run has no written executive summary)' : 'The chairman’s executive summary' },
           run.exec.change ? h('b', null, `${run.exec.change}. `) : null, run.exec.bottom_line) : null,
         h('div', { className: 'hc-row hc-wrap', style: { marginTop: 12, gap: 6 } },
@@ -2109,22 +2186,28 @@ function DecisionView({ run, onReplay, openChat, onFollow, openHelp }) {
     Object.keys(run.switched || {}).length ? h('div', { className: 'hc-swnote', role: 'note' },
       h('b', null, `↺ ${Object.keys(run.switched).length === 1 ? '1 seat was' : `${Object.keys(run.switched).length} seats were`} answered by another model. `),
       `${Object.entries(run.switched).map(([who, sw]) => `${who}: ${shortModel(sw.assigned) || 'its model'} was unavailable, so Hermes used ${shortModel(sw.model)}`).join('; ')}. `,
-      'This is Hermes’s fallback (often a rate-limited free model). Those seats are not independent views, and their cost is counted at the model that answered.') : null,
+      'This is Hermes’s fallback (often a rate-limited free model). Those seats are not independent views, and their cost is counted at the model that answered.',
+      run.independence?.line ? h('div', { style: { marginTop: 4 } }, h('b', null, run.independence.line)) : null,
+      run.chair_overlap?.line ? h('div', { style: { marginTop: 4 } }, run.chair_overlap.line) : null)
+      : run.independence?.line || run.chair_overlap?.line ? h('div', { className: 'hc-swnote', role: 'note' },
+        run.independence?.line ? h('div', null, h('b', null, run.independence.line)) : null,
+        run.chair_overlap?.line ? h('div', { style: run.independence?.line ? { marginTop: 4 } : null }, run.chair_overlap.line) : null) : null,
+    h(SoloCompare, { run }),
     h('div', { className: 'hc-lower' },
       panel('How the table stood', null,
         h(MiniArc, { height: 190, seats: seats.map(s => { const rf = roleFit(run, s.label); return { key: s.label, name: s.name, model: servedBy(run, s.name)?.model || s.model, provider: s.provider, stance: stances[s.label] || (run.answers?.[s.label]?.status === 'failed' ? 'failed' : ''),
           drift: rf?.fit === 'drifted',
-          title: `(${s.label}) ${s.name} · ${shortModel(s.model) || 'active model'}${stances[s.label] === 'dissent' ? ' · dissent' : stances[s.label] === 'agree' ? ' · in line with the decision' : ''}${rf ? `\nRole: ${rf.fit === 'drifted' ? 'drifted' : 'kept'}${rf.note ? ` · ${rf.note}` : ''}` : ''}` } }) }),
+          title: `(${s.label}) ${s.name} · ${shortModel(s.model) || activeAs(run, s.name)}${stances[s.label] === 'dissent' ? ' · dissent' : stances[s.label] === 'agree' ? ' · in line with the decision' : ''}${rf ? `\nRole: ${rf.fit === 'drifted' ? 'drifted' : 'kept'}${rf.note ? ` · ${rf.note}` : ''}` : ''}` } }) }),
         h('div', { className: 'hc-legend2' }, h('span', null, h('i', { style: { background: 'var(--hc-ok)' } }), 'In line with the decision'),
           h('span', null, h('i', { style: { background: 'var(--hc-warn)' } }), 'Dissent'), h('span', null, h('i', { style: { background: 'var(--hc-acc)' } }), 'Chair'),
           ((run.chair || {}).role_fit || []).some(x => x.fit === 'drifted')
             ? h('span', { title: 'The chairman found this seat mostly answered outside its role. Hover the seat for the reason; rewrite its instructions if it keeps happening.' },
               h('b', { className: 'hc-drift-k' }, '!'), 'Drifted from role') : null)),
       h('div', { className: 'hc-panel' },
-        h('div', { className: 'hc-ph' }, 'Blind ranking', h('span', { className: 'hc-phr' }, R.length ? 'average rank · lower is better' : '')),
+        h('div', { className: 'hc-ph' }, 'Blind ranking', h('span', { className: 'hc-phr' }, R.length ? 'average place from the others · lower is better' : '')),
         R.length ? h('div', { className: 'hc-pb hc-rbars' }, R.map(x => h('div', { key: x.label, className: 'hc-rrowb' },
           h('span', { className: 'hc-ellipsis', title: shortModel((run.seats || []).find(s => s.label === x.label)?.model) }, `(${x.label}) ${nameOf(run, x.label)}`),
-          h('span', { className: 'hc-rbar' }, h('i', { style: { width: `${Math.max(4, ((k - x.avg_rank) / (k - 1)) * 100)}%` } })),
+          h('span', { className: 'hc-rbar' }, h('i', { style: { width: `${Math.max(4, rankFrac(x, k) * 100)}%` } })),
           h('span', { className: 'hc-mono hc-muted hc-xs' }, x.avg_rank.toFixed(1))))) : null,
         h(Matrix, { run, rows: run.matrix?.rows || [], masked: false, legend: true })),
       h('div', { className: 'hc-panel' }, h(DecisionTabs, { run, tab, setTab, openHelp }))))
@@ -2146,7 +2229,7 @@ function DecisionTabs({ run, tab, setTab, openHelp }) {
       return h('button', { key: l, className: 'hc-ansrow', onClick: () => setOpen(l), title: 'Read this seat’s answer' },
         h('span', { className: 'hc-rk' }, (run.ranking || []).length ? i + 1 : '·'),
         h('div', { style: { minWidth: 0 } }, h('b', { className: 'hc-ellipsis', style: { display: 'block' } }, s.name), servedBy(run, s.name) ? h('div', { className: 'hc-xs hc-warn-t hc-mono hc-ellipsis', title: swTitle(servedBy(run, s.name), s) }, `↺ ${shortModel(servedBy(run, s.name).model)}`)
-          : h('div', { className: 'hc-xs hc-muted hc-mono hc-ellipsis' }, shortModel(s.model) || 'active model')),
+          : h('div', { className: 'hc-xs hc-muted hc-mono hc-ellipsis' }, shortModel(s.model) || activeAs(run, s.name))),
         h('div', { dir: 'auto' }, roleFit(run, l)?.fit === 'drifted' ? h('span', { className: 'hc-drift-tag', title: roleFit(run, l).note }, 'drifted from role') : null,
           a.status === 'ok' ? a.summary : h('span', { className: 'hc-warn-t' }, `No answer (${a.error || 'not run'})`)))
     })

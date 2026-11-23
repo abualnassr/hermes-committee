@@ -119,7 +119,40 @@ async def run_detail(run_id: str):
     out = insights.public_run(run, history)
     out["stale"] = _stale(run, base, store)
     out["cancel_requested"] = store.cancel_requested(base, run_id)
+    if run.get("status") == "failed":
+        import importlib
+        target, why = importlib.import_module(f"{_CORE}.engine").retry_target(run)
+        out["retry"] = {"stage": target, "why": why}
     return out
+
+
+@router.post("/runs/{run_id}/retry")
+async def retry(run_id: str, body: dict):
+    """Prepare a retry from the page: {main: [seat names]} gives those failed seats Hermes's main model.
+    The choice is stored with the run; the page then starts `/hermes-committee:convene retry=<id>` in a chat,
+    where committee_retry applies it and the run continues with only what failed."""
+    import importlib
+    store, _i, _t, _c = _mods()
+    engine = importlib.import_module(f"{_CORE}.engine")
+    base = _base()
+    try:
+        run = store.load(base, run_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if run is None:
+        raise HTTPException(404, f"No run {run_id}")
+    target, why = engine.retry_target(run)
+    if not target:
+        return {"ok": False, "error": why}
+    failed = {s["name"] for s in run["seats"] if (run["answers"].get(s["label"]) or {}).get("status") != "ok"}
+    main = [str(x) for x in body.get("main") or [] if isinstance(x, str)]
+    bad = [x for x in main if x not in failed]
+    if bad:
+        return {"ok": False, "error": f"Only a seat that failed can change model: {', '.join(bad)}."}
+    run["retry_request"] = {"t": time.time(), "swaps": {x: {"provider": "", "model": ""} for x in main}}
+    store.save(base, run)
+    who = "the chairman" if target == "chair" else ", ".join(s for s in (x["name"] for x in run["seats"]) if s in failed)
+    return {"ok": True, "stage": target, "who": who, "message": f"/hermes-committee:convene retry={run_id}"}
 
 
 @router.post("/runs/{run_id}/extend")
@@ -304,7 +337,8 @@ async def create_draft(body: dict):
                                      chairman_guidance=body.get("chairman_guidance"),
                                      decision_focus=body.get("decision_focus"),
                                      research=body.get("research") if isinstance(body.get("research"), bool) else None,
-                                     research_secs=body.get("research_secs"))
+                                     research_secs=body.get("research_secs"),
+                                     solo=body.get("solo") if isinstance(body.get("solo"), bool) else None)
     except cfgmod.ConfigError as exc:
         raise HTTPException(400, str(exc))
     gate = _gate(entry, [*roster["seats"], roster["chairman"]])
@@ -570,6 +604,7 @@ def _estimate_for(body: dict, roster: dict, settings: dict) -> dict[str, Any]:
             ctx_warn.append(f"{slot.get('name') or 'Chairman'} may get too much text: its model failed before at "
                             f"about {int(failed):,} tokens. Remove some files or pick another model.")
     ctx_warn += _c.free_model_warnings([*run["seats"], run["chairman"]])
+    ctx_warn += _c.setup_warnings([*run["seats"], run["chairman"]], len(run["seats"]), run.get("quorum") or 0)
     return {**est, "limit": lim, "low_fmt": pricing.fmt(est["low"]), "high_fmt": pricing.fmt(est["high"]),
             "context_warnings": ctx_warn,
             "list_high_fmt": pricing.fmt(est["list_high"]), "limit_fmt": pricing.fmt(lim) if lim else None,
@@ -617,7 +652,8 @@ async def estimate(body: dict):
                                      chairman_guidance=body.get("chairman_guidance"),
                                      decision_focus=body.get("decision_focus"),
                                      research=body.get("research") if isinstance(body.get("research"), bool) else None,
-                                     research_secs=body.get("research_secs"))
+                                     research_secs=body.get("research_secs"),
+                                     solo=body.get("solo") if isinstance(body.get("solo"), bool) else None)
     except cfgmod.ConfigError as exc:
         return {"error": str(exc)}
     return _estimate_for(body, roster, settings)

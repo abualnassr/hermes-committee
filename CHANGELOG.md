@@ -1,5 +1,171 @@
 # Changelog
 
+## 0.5.1
+
+- **The chairman may defer, under a strict rule.** When the right decision turns on one specific fact that
+  nobody has and you can find out, the chairman may answer "Not yet": it names the fact, says how to find it,
+  and gives the decision if yes and if no. The page shows "⏸ Not yet: one fact decides it" with three cards
+  (Find out / If yes / If no); both reports show the same under the decision, and the chat result carries
+  `deferred`. The rule is checked in code, not only asked for: a deferral that gives the same decision either
+  way, or leaves one answer without a decision, is refused, its decision stands as written, and a warning
+  says why. The prompt tells the chairman never to defer to dodge a hard call, for several missing facts, or
+  when a check the user would do anyway does not change the decision.
+- **Points the verdict leaves out are named.** After the verdict, every point still disputed after the debate
+  is checked: if the chairman gave no ruling on it, never mentions its id, and uses fewer than half of the
+  point's words anywhere in the verdict, a warning says "The verdict does not address D2: … The seats still
+  disagreed on it after the debate." A warning only, and only for points left out entirely. On the 10 saved
+  runs that had open points after the debate, it raised none.
+- **A seat that spends its whole debate reply thinking gets thinking turned off.** In a live run a reasoning-heavy
+  model thought through 1,200, 3,600 and 8,192 tokens at "low" thinking and wrote nothing, in both rounds: 71% of
+  the run's cost for no reply. Now, when a debate reply, ranking, agenda or picture description stops at its
+  cap with nothing usable, the next try asks with thinking off ("none", which Hermes fits to what the provider
+  accepts) as well as more room, and that seat's later calls of the same kinds in the run start with thinking
+  off. The answer and the verdict keep their thinking level. A provider that refuses "off" is asked the usual
+  way, without being marked as refusing thinking.
+- **The live feed no longer flickers during the debate.** Replies already in were stamped with the current
+  time on every refresh, and the page hides events later than its own clock, so they disappeared and came
+  back on each poll (11 ↔ 17 events). They now keep the time they arrived.
+
+## 0.5.0
+
+- **A member that joins the majority without new evidence is flagged.** Studies of AI debate found that
+  members give in to the majority more often than they are persuaded, that a member standing alone gives in
+  most, and that telling them not to does not help. So this is a check in code, not a prompt: a change of side
+  is flagged when the side it moved to was already held by most of the other members and the reply cites no
+  evidence the member had not cited before. The debate on the page and in both reports marks it ("joined the
+  majority without new evidence (had stood alone)"), the findings list it, and the chairman gets the member's
+  original view with an instruction to weigh it as if it had been kept and to say why it did or did not follow
+  it. A move toward a minority, a three-way split, a concession, or a change backed by a source the member had
+  not used is not flagged. No extra model calls. The check cannot judge an argument's quality: a member that
+  cites, for the first time, a file everyone already had counts as bringing new evidence.
+- **Chairman alone (opt-in, off by default).** The chairman also answers the question by itself, at the same
+  time as the seats, with the same question and evidence and no role. The Decision page and both reports show
+  that answer next to the committee's verdict ("On its own" / "With the committee"), so you can see whether
+  the committee changed or added anything over one model; if the two keep matching on your kind of question,
+  one model may be enough. The chairman never sees its own answer when it writes the verdict, so it cannot
+  anchor on it. One extra call on the chairman's model, counted in the estimate and the budget check, and no
+  extra time. If that call fails the verdict is unaffected. Switch on the page ("⚖ Chairman alone"), `solo`
+  in the chat tool, or `--solo` in the terminal; saved committees keep it. Nothing judges the two answers: the
+  plugin shows both and leaves the comparison to you.
+- **Round 2 skips points where round 1 changed nothing.** With 2 debate rounds, round 2 used to re-run every
+  point still disputed. Now a point is left out when, in round 1, at least one member replied on it, nobody
+  changed side or conceded, and no reply on it cited a source that member had not cited before: another
+  round would only repeat the same arguments. Round 2 covers the remaining points, or is skipped if none are
+  left, which saves one call per member. The debate summary on the page and in both reports names the points
+  ("round 2 skipped D1, D3: no change of side or new evidence there in round 1"). A point nobody managed to reply on is
+  still debated in round 2. The cost estimate still assumes both rounds. Runs with 1 round (the default) are
+  unchanged.
+- **A debate reply written as JSON in the model's own words is now read.** In a live run a reasoning-heavy
+  model's round-1 reply came back as plain text holding JSON with its own names ("points", "point", "side_tag"). The
+  plugin stored that text as the seat's "position" and read no change of side, so the seat's real round-1
+  move appeared to happen in round 2, after the others had moved, and was wrongly flagged three times as
+  joining the majority without new evidence; the chairman then discounted that seat. Such replies are now
+  read (also inside a code fence), and JSON the plugin still cannot read is a failed reply, not a position.
+- **"Joined the majority" counts seats.** The debate summary said "2 seats changed side · 3 joined the
+  majority …" when it was one seat on three points; it now says "1 joined the majority without new evidence
+  (on 3 points)".
+
+## 0.4.9
+
+- **Retry a run that stopped without a verdict.** When too few seats answer (a provider with no key, no
+  credit or a daily cap is the common case) or the chairman fails, the run can be retried: only the seats
+  that failed, or only the chairman, are asked again. The answers that came in are kept as they were, and
+  the first try's cost stays in the total. A failed seat can be given Hermes's main model, or any model you
+  name. Three ways in: the **Retry** button in the Committee page's *No verdict* panel (with a "use Hermes's
+  main model" box per failed seat), asking in the chat ("retry it"), or `hermes committee retry <run_id>
+  [--seat NAME=PROVIDER/MODEL | NAME=main]`. Both reports list each retry: who was asked again, why the first
+  try failed and any model change. A run that never started (over budget) or a chairman stopped at the budget
+  limit is not retried, since the same limit would stop it again; at most 3 retries per run.
+- **Answers are counted by the models that wrote them.** Four answers from two models are not four
+  independent views: a seat answered by Hermes's fallback, or two seats on the same model (also through
+  different providers, or its `:free` tier), agree for the same reasons. When that happens the run says so
+  in one line ("4 answers came from 2 models (2 by Hermes's fallback model) …", or "a single-model panel, not
+  an independent committee" when one model wrote them all), and it shows on the Decision page, in the chat
+  result, in both reports ("4 of 4 seats answered · 2 models") and next to a unanimous first place. The
+  chairman is told which answers share a model and to count their agreement once. Runs where every answer
+  came from its own model show nothing new. The "all seats use the same model" check before a run now
+  also catches one model set up through several providers.
+- **Files and other models' text are material, never instructions.** Only web passages carried a warning
+  before. Now every stage (answers, blind vote, agenda, debate, chairman, picture descriptions) is told in its
+  instructions that only your question and brief are instructions; files, the evidence pack, picture
+  descriptions, web passages and anything another member wrote are material to weigh, and text in them that
+  addresses AI models ("ignore your instructions", "rank this first") is reported as a concern, not followed.
+  Each section of the prompt is labelled with where it came from. A procedure in a file is still evaluated as
+  part of the evidence. A follow-up's earlier verdict, which a model wrote, now appears as background instead
+  of inside "Brief from the user". A test runs a full committee with a debate where every answer, critique,
+  debate reply and file carries an attack line, and checks that it never reaches any prompt's instructions.
+  This is a guard in the prompts, not proof of safety: a model can still be persuaded by what it reads.
+- **A seat's vote for its own answer no longer counts.** Each seat still ranks every answer blind, its own
+  included, but its own answer is taken off its ballot before the places are averaged, so a seat's place and
+  first-place votes come only from the other seats (models tend to prefer answers in their own style). Places
+  now run from 1 to the number of answers minus one. The full ballots are kept and the "who ranked whom" table
+  still shows them, own answer shaded and marked as not counted; the "Self-preference" finding is unchanged.
+  "Unanimous first place" now means every other reviewer. Answers with the same average place and first votes
+  share a place: a tie at the top is not reported as "ranked first" or counted as a win in the model
+  standings. The two confidence findings are renamed "Most confident, placed first/last", since a peer place
+  is the committee's opinion, not proof of quality. Runs from before 0.4.9 keep their stored places and are
+  not described as excluding self-votes.
+- **Citations are checked against the evidence that exists.** After the answers, each debate round and the
+  verdict, every citation ([E3], [E2, E5], [E2–E4], [W1], [I2], and the evidence lists in debate replies) is
+  compared with the IDs the run really has: your file sections, pictures, the web passages you kept, and any
+  [E1]-style labels you wrote in pasted evidence. A citation to anything else gets one warning line ("Citations
+  to evidence that does not exist: Architect cites [E9]; Chairman cites [W4] (2 of 31 cited) …"), shown with
+  the run's other warnings on the page, in the chat and in both reports. The chairman is told which answers cite
+  missing evidence and not to rely on those points; the PDF prints such a citation as "[E9: not found]" instead
+  of linking it to the evidence appendix. This checks that a cited source exists, not that it says what the
+  model claims, and costs no extra model calls.
+- **Fixed after a real test run.** A seat given Hermes's main model (as a retry does) was shown only as "active
+  model" and counted as a model of its own; it now shows the model that really answered ("active model
+  (model X)") on the page and in both reports, and the model count uses that model, so a main model that is
+  also another seat's model is caught. The PDF's evidence appendix no longer marks its own example citations as
+  "[E2: not found]" when a run has only [E1].
+- **An empty debate reply no longer counts as a reply.** A thinking model could spend its whole 1,200-token
+  debate allowance thinking, three times, and write nothing; the run still said "3 of 3 replied" and the
+  chairman read that seat's reply as present. Now a reply that stopped at its cap without usable JSON is asked
+  again with three times the room, up to the run's own output cap (1,200 → 3,600 → 8,192 by default), which
+  also helps the agenda and picture descriptions. A reply with no response to the disputes and no position
+  is recorded as failed ("empty reply …"): the round shows "2 of 3", and the chairman sees "(no reply)" for
+  that seat. A model that never answers can now cost up to about 13,000 output tokens per debate round instead
+  of 3,600; the spend is recorded as usual.
+- **A note when the chairman is the same model as a seat.** The chairman does not know which answer its own
+  model wrote, but models tend to prefer their own style. Before a run, a chairman set to a model a seat also
+  uses gets a warning ("The chairman's model (X) is also used by Strategist …"). After the verdict, the run
+  checks the model that really answered each seat, including a seat retried with Hermes's main model, and adds
+  one line ("The chairman (model X) is the same model as Strategist, so it may favour that answer …") on the
+  Decision page, in the chat result and in both reports. Nothing is blocked and no model calls are added.
+
+## 0.4.8
+
+- **No false "answered by" label behind a router.** Some routers and custom endpoints report `auto` (or `default`)
+  instead of the model they ran, and 0.4.7 then marked the seat as answered by another model. A placeholder name
+  now counts as unknown, so no switch is claimed.
+- **Server refusals named.** A 5xx refusal now reads "no usable key at the provider (503)" when the provider says it
+  has no working key (a router at a daily cap is the common case), or "the provider is unavailable", instead of
+  the error class name. The failure summary says what to do: check the key, give the seat another provider, or
+  wait for the cap to reset.
+- **Two set-up warnings before the run.** A seat (or chairman) that names a model but no provider: its calls go to
+  your main provider, which may not serve that model. And a committee of 2 or 3 seats, where every seat must
+  answer, so one refused call stops the verdict.
+- **PDF report easier to find your way in.** Page 1 has a contents list (two columns, page numbers, every line a
+  link, each seat's answer on its own line). The header on each page names the section you are in. Model names
+  in the committee table no longer break mid-word, the chairman's reasoning no longer leaves a near-empty page
+  behind it, and the wording now says what the blind vote does: each seat ranks every answer, its own included.
+- **PDF report reorganised to read top-down.** Page 1 is the answer, with a row of figures (seats answered,
+  dissent, how the debate ended, time, cost). Then one page each: *Why* (the decision, the chairman's reasoning
+  without a repeated verdict heading, next actions as a table, "it would reverse if" beside "where they agreed"),
+  *Where they disagreed* (one card per point: the chairman's call, then each seat's side before → after and
+  its reason in one line), and *The committee* (maker logos, positions, and a grid of who ranked whom, each
+  seat's own answer shaded). The whole arguments move to an appendix, *The debate in full*. Appendices are
+  lettered by what the run has, so there is never a gap. Runs with no debate or no verdict drop the pages
+  that do not apply.
+- **Arrows and symbols print.** The report font has no arrows or maths signs, so "12 → 40 ppm" printed as
+  "12  40 ppm". Small subsets of Noto Sans Math and Noto Sans Symbols 2 (OFL, about 160 KB together) now fill the
+  gap: → ≈ ≤ ≥ ✓ ☐ and the like.
+- **Reports name the right version.** "About this report" and the PDF's file properties said *Hermes Committee
+  0.4.0* in every release since 0.4.0: the number was a constant nobody bumped. It is now read from
+  `plugin.yaml`, and a test keeps `plugin.yaml`, `pyproject.toml` and the changelog in step. The line also
+  gives both dates: when the report was written and when the run happened.
+
 ## 0.4.7
 
 - **Seats answered by another model are labelled.** When a seat's model is refused (a rate-limited free model is

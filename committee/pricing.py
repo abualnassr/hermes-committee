@@ -80,14 +80,28 @@ def describe_calls(run: dict[str, Any]) -> list[tuple[dict, int, int, int]]:
             for _ in todo]
 
 
-def stage1_calls(run: dict[str, Any], mt: Optional[int] = None) -> list[tuple[dict, int, int, int]]:
+def stage1_calls(run: dict[str, Any], mt: Optional[int] = None,
+                 only: Optional[set] = None) -> list[tuple[dict, int, int, int]]:
+    """The seats' answer calls; ``only``: just these labels (a retry asks only the seats that failed)."""
     mt = mt or _mt(run)
     n_img, base = _images(run), _base(run)
     out = []
     for s in run["seats"]:
+        if only is not None and s["label"] not in only:
+            continue
         pics = n_img * (IMAGE_TOKENS + DESC_TOKENS if s.get("sees_images") else DESC_TOKENS)
         out.append((s, base + tok(s.get("instructions", "")) + pics, min(TYPICAL_OUT["stage1"], mt), mt))
     return out
+
+
+def solo_call(run: dict[str, Any], mt: Optional[int] = None) -> tuple[dict, int, int, int]:
+    """The chairman answering alone (opt-in): the same context as a seat, on the chairman's model."""
+    mt = mt or _mt(run)
+    return run["chairman"], _base(run) + _images(run) * DESC_TOKENS, min(TYPICAL_OUT["stage1"], mt), mt
+
+
+def solo_calls(run: dict[str, Any]) -> list[tuple[dict, int, int, int]]:
+    return [solo_call(run)] if run.get("solo") and (run.get("solo_answer") or {}).get("status") != "ok" else []
 
 
 def _answer_tokens(run: dict[str, Any], mt: int) -> tuple[list[int], list[int]]:
@@ -138,9 +152,10 @@ def estimate(run: dict[str, Any]) -> dict[str, Any]:
     """Whole-run range before anything is sent: low = typical answer lengths, high = every call
     writes its maximum. ``list_*`` are the same at list price (subscription seats included)."""
     delib = deliberating(run)
-    calls = research_calls(run) + describe_calls(run) + stage1_calls(run) + (review_calls(run) if run.get("review") else []) \
+    calls = research_calls(run) + describe_calls(run) + stage1_calls(run) + solo_calls(run) \
+        + (review_calls(run) if run.get("review") else []) \
         + ([agenda_call(run)] + round_calls(run) * rounds(run) if delib else []) + [chair_call(run)]
-    typical = research_calls(run) + describe_calls(run) + stage1_calls(run) \
+    typical = research_calls(run) + describe_calls(run) + stage1_calls(run) + solo_calls(run) \
         + (review_calls(run, typical=True) if run.get("review") else []) \
         + ([agenda_call(run, typical=True)] if delib else []) + [chair_call(run, typical=True)]
     lo, hi = _sum(typical, high=False), _sum(calls, high=True)

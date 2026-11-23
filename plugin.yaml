@@ -2,7 +2,7 @@ manifest_version: 2
 api_version: 1
 name: hermes-committee
 label: Hermes Committee
-version: 0.4.7
+version: 0.5.1
 description: >-
   A committee of AI models for hard decisions: seats with their own roles and models answer
   independently, rank each other's anonymous answers, debate where they disagree, and a
@@ -21,6 +21,7 @@ capabilities:
 provides_tools:
   - committee_open
   - committee_advance
+  - committee_retry
 provides_hooks:
   - post_tool_call
   - on_session_end

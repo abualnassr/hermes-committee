@@ -90,8 +90,8 @@ def test_a_provider_that_refuses_the_level_is_called_as_before_and_remembered(se
 
 def test_register_adds_one_task_per_level_with_its_reasoning_effort(plugin):
     mod, ctx = plugin
-    assert ctx.aux_tasks == {f"committee_think_{lv}": {"reasoning_effort": lv} for lv in ("low", "medium", "high")}
-    assert mod._THINK_TASKS == {lv: f"committee_think_{lv}" for lv in ("low", "medium", "high")}
+    assert ctx.aux_tasks == {f"committee_think_{lv}": {"reasoning_effort": lv} for lv in ("none", "low", "medium", "high")}
+    assert mod._THINK_TASKS == {lv: f"committee_think_{lv}" for lv in ("none", "low", "medium", "high")}
 
 
 def test_calls_route_through_the_task_for_their_level_and_keep_the_seats_model(plugin, monkeypatch):

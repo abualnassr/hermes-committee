@@ -61,10 +61,10 @@ def test_page_one_is_one_page_even_when_everything_is_long(settings, fake_llm, t
                 "change": ""}, next_actions=[LONG] * 6, reverse_if=[LONG] * 4)
     doc = fitz.open(str(report_pdf.render(run, tmp_path / "r" / "report.pdf")))
     toc = {t[1]: t[2] for t in doc.get_toc()}
-    assert toc["Executive summary"] == 1 and toc["Decision in detail"] == 2
+    assert toc["Executive summary"] == 1 and toc["Why: the chairman's reasoning"] == 2
     p1 = doc[0].get_text().replace("\n", " ")
     assert p1.startswith("HERMES COMMITTEE  ·  EXECUTIVE SUMMARY") and "Do next" in p1
-    assert "3 more in Decision in detail." in p1 and "Inside this report:" in p1
+    assert "3 more under Next actions, page 2." in p1 and "CONTENTS" in p1
 
 
 def test_the_page_shows_the_bottom_line(settings, fake_llm):

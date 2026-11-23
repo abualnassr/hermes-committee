@@ -39,7 +39,7 @@ def test_pdf_report_renders_including_arabic(settings, fake_llm, tmp_path):
 
 def test_plugin_open_advance_until_done(plugin):
     mod, ctx = plugin
-    assert set(ctx.tools) == {"committee_open", "committee_advance"}
+    assert set(ctx.tools) == {"committee_open", "committee_advance", "committee_retry"}
     assert set(ctx.hooks) == {"post_tool_call", "on_session_end"} and "convene" in ctx.skills
     opened = json.loads(ctx.tools["committee_open"]({"question": "Rewrite?", "evidence": "x"}, session_id="s1"))
     assert opened["ok"] and opened["planned_model_calls"]["total"] == 9

@@ -82,8 +82,10 @@ def test_a_fallback_answer_is_kept_labelled_and_warned(monkeypatch):
     sw = run["switched"]
     assert set(sw) == {names["lab/alpha-2:free"], names["lab/gamma-4:free"]}
     assert all(x["model"] == "main-model[1m]" and "stage1" in x["stages"] and "review" in x["stages"] for x in sw.values())
-    warned = [w for w in run["warnings"] if "fallback model" in w]
+    warned = [w for w in run["warnings"] if "fallback model" in w and "answers came from" not in w]
     assert len(warned) == 2                                    # once per seat, not once per call
+    summary = [w for w in run["warnings"] if "answers came from" in w]
+    assert len(summary) == 1 and "(2 by Hermes's fallback model)" in summary[0]   # and once for the count
     # the switched calls are priced at the model that answered: 100 in + 50 out at $3/$15 per Mtok
     swapped = [u for u in run["usage"] if u.get("assigned")]
     assert swapped and all(abs(u["cost_est"] - 0.00105) < 1e-9 for u in swapped)
@@ -121,3 +123,40 @@ def test_free_models_are_warned_before_the_run():
     paid = {**FREE, "presets": {"free": {**FREE["presets"]["free"], "chairman": {"provider": "hub", "model": "lab/chair-1"},
                                          "seats": [{"provider": "hub", "model": f"lab/m-{i}"} for i in range(4)]}}}
     assert not any(":free" in w for w in c.build_roster(paid)["warnings"])
+
+
+def test_a_router_that_reports_auto_is_not_called_a_switch():
+    assert e.served_by({"model": "lab/alpha-2"}, Reply("json", provider="custom", model="auto")) is None
+    assert e.served_by({"model": "lab/alpha-2"}, Reply("json", provider="hub", model="hub/auto")) is None
+    assert e.served_by({"model": "auto"}, Reply("json", provider="hub", model="lab/beta-3")) is None
+    assert e.served_by({"model": "lab/alpha-2"}, Reply("json", provider="main", model="main-model")) == ("main", "main-model")
+
+
+def test_a_503_from_a_router_without_a_key_is_named_and_advised():
+    class InternalServerError(Exception):
+        status_code = 503
+    err = InternalServerError("Error code: 503 - {'error': {'message': 'No candidate model has a configured, usable "
+                              "provider key. Add provider API keys in the dashboard. Soonest reset ~20h.'}}")
+    line = e.describe_error(err)
+    assert line.startswith("no usable key at the provider (503): No candidate model")
+    assert e.describe_error(ApiError("Error code: 502 - {'error': {'message': 'Bad gateway upstream'}}")) \
+        .startswith("the provider is unavailable (502)")
+    run = {"seats": [{"label": "A", "name": "Seat A", "provider": "", "model": "lab/alpha-2"},
+                     {"label": "B", "name": "Seat B", "provider": "", "model": "lab/beta-3"}]}
+    why = e.failure_summary(run, {"A": (False, line), "B": (True, {})})
+    assert why.startswith("Seat A: no usable key at the provider (503).") and "daily cap" in why
+
+
+def test_a_seat_with_a_model_but_no_provider_is_warned():
+    bare = {"default_preset": "b", "deliberate": "never", "presets": {"b": {
+        "template": "classic", "chairman": {"provider": "hub", "model": "lab/chair-1"},
+        "seats": [{"provider": "", "model": "lab/alpha-2"}, {"provider": "hub", "model": "lab/beta-3"}]}}}
+    w = [x for x in c.build_roster(bare)["warnings"] if "no provider" in x]
+    assert len(w) == 1 and "names a model but no provider" in w[0]
+    assert not any("no provider" in x for x in c.build_roster(FREE)["warnings"])
+
+
+def test_a_committee_where_every_seat_must_answer_is_warned():
+    assert any("every seat must answer" in w for w in c.setup_warnings([], 2, 2))
+    assert any("every seat must answer" in w for w in c.setup_warnings([], 3, 3))
+    assert not c.setup_warnings([], 4, 3)

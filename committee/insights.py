@@ -62,7 +62,8 @@ def run_insights(run: dict[str, Any]) -> list[dict[str, str]]:
     answers = _ok_answers(run)
     reviews = _ok_reviews(run)
     ranking = run.get("ranking") or []
-    pos = {r["label"]: i + 1 for i, r in enumerate(ranking)}
+    from .engine import clear_first, places
+    pos = places(ranking)
 
     if reviews:
         selfish = [lab for lab, r in reviews.items() if r["ranking"][0] == lab]
@@ -77,21 +78,32 @@ def run_insights(run: dict[str, Any]) -> list[dict[str, str]]:
             out.append({"kind": "self", "title": "No self-preference",
                         "text": f"None of the {len(reviews)} reviewers ranked their own anonymous answer first."})
 
-        firsts = [r["ranking"][0] for r in reviews.values()]
-        top = max(set(firsts), key=firsts.count)
-        if firsts.count(top) == len(firsts) and len(firsts) > 1:
+        # unanimous among the others: a seat's vote for itself does not count (0.4.9); older runs: every ballot
+        top = ranking[0]["label"] if ranking and clear_first(ranking) else None
+        if "of" in (ranking[0] if ranking else {}):
+            voters = [lab for lab in reviews if lab != top]
+            unanimous = top is not None and len(voters) > 1 and ranking[0]["first_votes"] == len(voters)
+        else:
+            firsts = [r["ranking"][0] for r in reviews.values()]
+            unanimous = top is not None and len(firsts) > 1 and firsts.count(top) == len(firsts)
+        if unanimous:
+            from .config import independence
+            ind = independence(run)
             out.append({"kind": "consensus", "title": "Unanimous first place",
-                        "text": f"Every reviewer ranked {seats.get(top, {}).get('name', top)} first."})
+                        "text": f"Every {'other ' if top in reviews else ''}reviewer ranked "
+                                f"{seats.get(top, {}).get('name', top)} first."
+                                + (f" The ballots came from {ind['models']} model{'s' if ind['models'] != 1 else ''}, "
+                                   "so this is less independent than it looks." if ind["line"] else "")})
 
     conf = {lab: a["confidence"] for lab, a in answers.items() if isinstance(a.get("confidence"), (int, float))}
     if len(conf) >= 2 and pos:
         hi = max(conf, key=lambda k: conf[k])
         lo_rank = max(pos.values())
         if hi in pos and pos[hi] == lo_rank and lo_rank > 1:
-            out.append({"kind": "calibration", "title": "Confidence ≠ quality",
+            out.append({"kind": "calibration", "title": "Most confident, placed last",
                         "text": f"{seats[hi]['name']} was the most confident ({conf[hi]:.2f}) and its peers ranked it last."})
         elif hi in pos and pos[hi] == 1:
-            out.append({"kind": "calibration", "title": "Confidence matched quality",
+            out.append({"kind": "calibration", "title": "Most confident, placed first",
                         "text": f"{seats[hi]['name']} was the most confident ({conf[hi]:.2f}) and its peers ranked it first."})
 
     chair = run.get("chair") or {}
@@ -115,16 +127,25 @@ def run_insights(run: dict[str, Any]) -> list[dict[str, str]]:
             extra = f" and {len(conceded)} concession{'s' if len(conceded) != 1 else ''}" if conceded else ""
             out.append({"kind": "debate", "title": "The debate changed minds",
                         "text": f"{len(changed)} change{'s' if len(changed) != 1 else ''} of side{extra} in the "
-                                f"deliberation ({', '.join(who)}). Each gave its reason; the Deliberation section shows them."})
+                                f"deliberation ({', '.join(who)}). Each gave its reason, shown with the debate."})
         elif conceded:
             who = sorted({m["seat"] for m in conceded})
             out.append({"kind": "debate", "title": "Concessions, no change of side",
                         "text": f"{', '.join(who)} conceded part of the other side's argument but kept its position; "
-                                "the Deliberation section shows what was conceded."})
+                                "what was conceded is shown with the debate."})
         else:
             out.append({"kind": "debate", "title": "Nobody moved",
                         "text": "Every member held its position through the deliberation, so the chairman decided "
                                 "between arguments that did not converge."})
+        weak = [m for m in changed if m.get("unbacked")]
+        if weak:
+            alone = [m for m in weak if m.get("alone")]
+            out.append({"kind": "debate", "title": "Joined the majority without new evidence",
+                        "text": "; ".join(f"{m['seat']} on {m['dispute']}" for m in weak)
+                                + f" moved to the side most others held without citing any new evidence"
+                                + (f" ({len(alone)} after standing alone)" if alone else "")
+                                + ". In AI debates that is often giving in, not being persuaded; the chairman was told "
+                                  "to weigh the original position."})
         if held:
             out.append({"kind": "debate", "title": "Still disputed",
                         "text": f"{len(held)} point{'s' if len(held) != 1 else ''} stayed disputed after the debate; "
@@ -171,6 +192,7 @@ def standings(runs: Iterable[dict[str, Any]]) -> dict[str, Any]:
             continue
         counted += 1
         n = len(ranking)
+        from .engine import clear_first
         seats = {s["label"]: s for s in run.get("seats") or []}
         reviews = _ok_reviews(run)
         secs = stage_seconds(run).get("stage1") or {}
@@ -182,12 +204,12 @@ def standings(runs: Iterable[dict[str, Any]]) -> dict[str, Any]:
             row = rows.setdefault(key, {"model": key, "provider": s.get("provider") or "", "seats": 0, "runs": set(),
                                         "scores": [], "firsts": 0, "conf": [], "secs": [], "self_first": 0,
                                         "wins": 0, "roles": set()})
-            score = rank_score(r["avg_rank"], n)
+            score = rank_score(r["avg_rank"], r.get("of") or n)
             row["seats"] += 1
             row["runs"].add(run["id"])
             row["scores"].append(score)
             row["firsts"] += r.get("first_votes", 0)
-            row["wins"] += 1 if i == 0 else 0
+            row["wins"] += 1 if i == 0 and clear_first(ranking) else 0
             row["roles"].add(s["name"])
             a = (run.get("answers") or {}).get(r["label"]) or {}
             if isinstance(a.get("confidence"), (int, float)):
@@ -239,6 +261,8 @@ def stage_starts(run: dict[str, Any]) -> dict[str, float]:
     if run.get("research"):
         out["research"] = 0.0
     out["stage1"] = (desc[-1]["t"] if desc else t0) - t0
+    if run.get("solo"):
+        out["solo"] = out["stage1"]                         # it runs beside the answers
     s1 = _events(run, "stage1")
     if s1:
         out["review"] = s1[-1]["t"] - t0
@@ -440,9 +464,11 @@ def event_log(run: dict[str, Any]) -> list[dict[str, Any]]:
                            "kind": "reply", "who": name, "text": f"{_STANCE_WORD.get(x.get('stance'), x.get('stance'))} on {x.get('dispute')}",
                            "quote": x.get("argument") or ""})
     if live.get("stage") == "deliberate" and run.get("status") not in TERMINAL:
+        at = live.get("replied_at") or {}
         for name, reps in (live.get("replies") or {}).items():
+            t_in = at[name] - t0 if isinstance(at.get(name), (int, float)) else live.get("started", t0) - t0
             for x in reps:
-                ev.append({"t": round(_now_rel(run), 1), "kind": "reply", "who": name,
+                ev.append({"t": round(max(0.0, t_in), 1), "kind": "reply", "who": name,
                            "text": f"{_STANCE_WORD.get(x.get('stance'), x.get('stance'))} on {x.get('dispute')}", "quote": ""})
     ev.sort(key=lambda x: x["t"])
     return ev
@@ -471,9 +497,30 @@ def limit_changes(run: dict[str, Any], kind: str) -> str:
     return "; ".join(parts)
 
 
+def solo_compare(run: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The chairman's own answer beside the committee's verdict (only when it was asked for).
+    Not judged by a model: the two are shown together and the reader decides what the committee added."""
+    if not run.get("solo"):
+        return None
+    s, chair = run.get("solo_answer") or {}, run.get("chair") or {}
+    if s.get("status") != "ok":
+        return {"ok": False, "error": s.get("error") or "not run"}
+    from .config import _same_model_key
+    model = str((run.get("chairman") or {}).get("model") or "").rsplit("/", 1)[-1] or "Hermes's main model"
+    return {"ok": True, "model": model, "summary": s.get("summary") or "", "answer": s.get("answer") or "",
+            "confidence": s.get("confidence"), "verdict": chair.get("decision") if chair.get("status") == "ok" else None,
+            "verdict_confidence": chair.get("confidence") if chair.get("status") == "ok" else None}
+
+
 def public_run(run: dict[str, Any], history: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     """The run as the page needs it: the record plus derived facts."""
     out = {k: v for k, v in run.items() if not k.startswith("_")}
+    from .config import independence
+    out["independence"] = independence(run)
+    out["solo_compare"] = solo_compare(run)
+    from .config import active_as, chair_overlap
+    out["active_as"] = active_as(run)
+    out["chair_overlap"] = chair_overlap(run)
     if (run.get("chair") or {}).get("status") == "ok":
         from .followup import name_chair
         out["chair"] = name_chair(run["chair"], run.get("seats") or [])

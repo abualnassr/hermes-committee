@@ -126,8 +126,10 @@ def test_aggregate_average_rank_and_first_votes():
                "B": {"status": "ok", "ranking": ["B", "C", "A"]},
                "C": {"status": "failed"}}
     rows = e.aggregate(reviews, ["A", "B", "C"])
-    assert [r["label"] for r in rows] == ["B", "A", "C"]
-    assert rows[0] == {"label": "B", "avg_rank": 1.0, "first_votes": 2, "votes": 2}
+    # self-votes left out: A's ballot counts B 1st, C 2nd; B's ballot counts C 1st, A 2nd
+    assert [r["label"] for r in rows] == ["B", "C", "A"]
+    assert rows[0] == {"label": "B", "avg_rank": 1.0, "first_votes": 1, "votes": 1, "of": 2}
+    assert rows[1] == {"label": "C", "avg_rank": 1.5, "first_votes": 1, "votes": 2, "of": 2}
 
 
 def test_scrub_identity_keeps_ordinary_words(settings):

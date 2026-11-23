@@ -23,11 +23,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import answered_by, model_label
+from .logos import logo_svg, maker_of
 from .engine import usage_totals
 from . import __version__
 from .report_md import (DISCLAIMER, PRODUCT, about, arg_parts, debate_tally, delib_decided, delib_last, delib_line,
                         exec_summary, extra_cites,
-                        stance_word)
+                        stance_word, unbacked_note, move_of, solo_lines, defer_lines)
 
 FONTS = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 FOOTER = "Advisory output from AI models, not professional approval. See the disclaimer at the end."
@@ -51,6 +52,13 @@ _TNUM = {"tnum": True}
 def short_model(slot: dict[str, Any]) -> str:
     """Model id without the provider route (tables); 'active model' when unset."""
     return slot.get("model") or model_label(slot)
+
+
+def table_model(slot: dict[str, Any]) -> str:
+    """The model's own name for a narrow table column: 'claude-sonnet-5.5', not 'anthropic/claude-sonnet-5.5'
+    (the full route is in Appendix A). A slash in a name made it break mid-word."""
+    m = slot.get("model") or ""
+    return m.rsplit("/", 1)[-1] if m else model_label(slot)
 
 
 def has_rtl(text: str) -> bool:
@@ -94,7 +102,7 @@ def _new_pdf(run: dict[str, Any], theme: dict):
     from fpdf import FPDF
     from fpdf.enums import XPos, YPos
 
-    head = f"{PRODUCT}  ·  {run.get('title') or 'Committee report'}  ·  run {run['id']}"
+    head = f"{PRODUCT}  ·  {run.get('title') or 'Committee report'}"
 
     class Report(FPDF):
         MARKDOWN_LINK_UNDERLINE = False
@@ -105,7 +113,8 @@ def _new_pdf(run: dict[str, Any], theme: dict):
                 return
             self.set_font("Sans", "", SMALL)
             self.set_text_color(*FAINT)
-            self.cell(0, 6, _plain(head), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+            where = getattr(self, "cur_section", "")
+            self.cell(0, 6, _plain(head + (f"  ·  {where}" if where else "")), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             self.set_draw_color(*RULE)
             self.set_line_width(0.2)
             self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
@@ -126,7 +135,11 @@ def _new_pdf(run: dict[str, Any], theme: dict):
     pdf.add_font("Sans", "B", FONTS / "NotoSans-Bold.ttf")
     pdf.add_font("Arabic", "", FONTS / "NotoNaskhArabic-Regular.ttf")
     pdf.add_font("Arabic", "B", FONTS / "NotoNaskhArabic-Bold.ttf")
-    pdf.set_fallback_fonts(["Arabic", "Sans"])
+    # Noto Sans has no arrows, maths or check marks (→ ≈ ≤ ≥ ✓ ☐ …): without these, "12 → 40 ppm" printed as
+    # "12  40 ppm". Subsets of Noto Sans Math and Symbols 2 fill the gap, in any weight.
+    pdf.add_font("Math", "", FONTS / "NotoSansMath-Subset.ttf")
+    pdf.add_font("Symbols", "", FONTS / "NotoSansSymbols2-Subset.ttf")
+    pdf.set_fallback_fonts(["Arabic", "Sans", "Math", "Symbols"], exact_match=False)
     pdf.set_text_shaping(use_shaping_engine=True, features=_TNUM, direction="ltr")
     pdf.set_title(run.get("title") or f"Committee report {run['id']}")
     pdf.set_subject(_plain(run.get("question") or "")[:200])
@@ -144,9 +157,18 @@ def _md_safe(text: str) -> str:
 class _W:
     """Writing helpers bound to one document and one theme."""
 
-    def __init__(self, pdf, XPos, YPos, theme: dict, ev_page: Optional[int] = None):
+    def __init__(self, pdf, XPos, YPos, theme: dict, ev_page: Optional[int] = None, known: Optional[set] = None):
         self.pdf, self.X, self.Y, self.t, self.ev_page = pdf, XPos, YPos, theme, ev_page
+        self.known = known                     # evidence IDs the run has; a citation to anything else is not linked
         self.pages: dict[str, int] = {}        # section title -> page, for the executive summary's contents
+
+    def explain(self, text: str, **kw):
+        """A paragraph of the report's own words that shows the citation style ([E1], [W2]…): not checked."""
+        known, self.known = self.known, None
+        try:
+            self.para(text, **kw)
+        finally:
+            self.known = known
 
     @property
     def accent(self):
@@ -156,6 +178,10 @@ class _W:
         rtl = has_rtl(raw)
         text = _plain(raw, keep_bold=not rtl).strip()
         md = False
+        if self.known is not None and _CITE.search(text):
+            from .citations import cited
+            text = _CITE.sub(lambda m: m.group(0) if not cited(m.group(0)) or set(cited(m.group(0))) & self.known
+                             else f"[{m.group(1)}: not found]", text)
         if not rtl and ("**" in text or (self.ev_page and _CITE.search(text))):
             md = True
             text = _md_safe(text)
@@ -236,6 +262,8 @@ class _W:
     def section(self, text: str, new_page: bool = False, room: float = 45, level: int = 0):
         """A bookmarked section title with a thin rule; a new page when asked or when space is short."""
         pdf = self.pdf
+        if level == 0:
+            pdf.cur_section = text            # set before the page turn, so the new page's header names it
         if new_page or pdf.will_page_break(room):
             pdf.add_page()
         else:
@@ -307,8 +335,12 @@ class _W:
         flush()
 
     def table(self, header: list[str], rows: list[list[str]], widths: tuple, align: Optional[tuple] = None,
-              size: float = BODY):
-        """Unfilled table with hairline rules; numbers right-aligned; never a lone header at a page end."""
+              size: float = BODY, logos: Optional[list] = None, md: bool = False, shade: Optional[set] = None,
+              width: Optional[float] = None):
+        """Unfilled table with hairline rules; numbers right-aligned; never a lone header at a page end.
+        ``logos``: one SVG (or None) per row, drawn in the first column (``header`` names it, usually "").
+        ``md``: **bold** inside cells. ``shade``: (row, column) cells tinted, columns counted after the logo."""
+        import io
         from fpdf.fonts import FontFace
         pdf = self.pdf
         if rows and pdf.will_page_break(min(7.5 * (len(rows) + 1) + 4, 110)):
@@ -318,17 +350,189 @@ class _W:
         pdf.set_fill_color(255, 255, 255)
         pdf.set_draw_color(*RULE)
         pdf.set_line_width(0.2)
-        with pdf.table(col_widths=widths, text_align=align or "LEFT", line_height=5.6, first_row_as_headings=True,
+        tint = FontFace(fill_color=self.t["tint"])
+        with pdf.table(col_widths=widths, text_align=align or "LEFT", line_height=5.6 if size >= BODY else 4.3,
+                       first_row_as_headings=True,
                        borders_layout="HORIZONTAL_LINES", cell_fill_mode="NONE", repeat_headings=1, padding=(1.4, 1.5),
-                       headings_style=FontFace(emphasis="BOLD", color=MUTED, size_pt=SMALL),
-                       width=pdf.epw) as t:
+                       headings_style=FontFace(emphasis="BOLD", color=MUTED, size_pt=SMALL), markdown=md,
+                       width=width or pdf.epw, align="LEFT") as t:
             t.row([_plain(h) for h in header])
-            for r in rows:
-                t.row([_plain(str(c)) for c in r])
+            for i, r in enumerate(rows):
+                row = t.row()
+                if logos is not None:
+                    if logos[i]:
+                        row.cell(img=io.BytesIO(logos[i]), img_fill_width=False)
+                    else:
+                        row.cell("")
+                for j, c in enumerate(r):
+                    text = _md_safe(_plain(str(c), keep_bold=True)) if md else _plain(str(c))
+                    row.cell(text, style=tint if shade and (i, j) in shade else None)
         pdf.ln(3)
+
+    def callout(self, label: str, text: str, note: str = "", size: float = BODY):
+        """A slim tinted line with the accent bar: 'LABEL  text  note' (the decision on page 2, a chairman's call)."""
+        pdf = self.pdf
+        pad, bar = 3.0, 1.2
+        inner = pdf.epw - 2 * pad - bar
+        x = pdf.l_margin + bar + pad
+        body = f"**{label}**   {text}" + (f"   {note}" if note else "")
+
+        def emit(p, ww, y):
+            p.set_y(y + pad)
+            ww.para(body, size=size, x=x, width=inner)
+            return p.get_y() + pad - 1 - y
+
+        y0 = pdf.get_y()
+        with pdf.offset_rendering() as dummy:
+            h = emit(dummy, _W(dummy, self.X, self.Y, self.t, self.ev_page), y0)
+        if pdf.will_page_break(h + 2):
+            pdf.add_page()
+            y0 = pdf.get_y()
+        pdf.set_fill_color(*self.t["tint"])
+        pdf.rect(pdf.l_margin, y0, pdf.epw, h, "F")
+        pdf.set_fill_color(*self.accent)
+        pdf.rect(pdf.l_margin, y0, bar, h, "F")
+        emit(pdf, self, y0)
+        pdf.set_y(y0 + h + 3)
+
+    def logo_line(self, logo: Optional[bytes], text: str, size: float = SMALL, color=MUTED):
+        """A line led by a small maker logo (the chairman under the committee table)."""
+        import io
+        pdf = self.pdf
+        if not logo:
+            self.para(text, size=size, color=color)
+            return
+        y = pdf.get_y()
+        pdf.image(io.BytesIO(logo), x=pdf.l_margin, y=y + 0.5, w=3.2, h=3.2)
+        self.para(text, size=size, color=color, x=pdf.l_margin + 4.6, width=min(pdf.epw, MEASURE) - 4.6)
 
 
 # ── data helpers ─────────────────────────────────────────────────────────────
+
+def _slot_logo(run: dict, slot: dict, name: str, rgb=INK) -> Optional[bytes]:
+    """The logo of the model that answered: the seat's own, or the one Hermes answered with instead."""
+    sw = (run.get("switched") or {}).get(name) or {}
+    model = sw.get("model") or slot.get("model")
+    return logo_svg(maker_of(model, sw.get("provider") or slot.get("provider")), rgb)
+
+
+def _sv(run: dict) -> bool:
+    from .engine import self_votes_left_out
+    return self_votes_left_out(run)
+
+
+def _answered_label(run: dict) -> str:
+    """'seats answered', plus how many models wrote them when that is fewer than the answers."""
+    from .config import independence
+    ind = independence(run)
+    return f"seats answered · {ind['models']} model{'s' if ind['models'] != 1 else ''}" if ind["line"] else "seats answered"
+
+
+def _exec_figures(run: dict) -> list[tuple[str, str]]:
+    """Page 1's figures: who answered, dissent, the debate, time and cost."""
+    seats = run.get("seats") or []
+    ok = sum(1 for s in seats if (run["answers"].get(s["label"]) or {}).get("status") == "ok")
+    out = [(f"{ok} of {len(seats)}", _answered_label(run))]
+    chair = run.get("chair") or {}
+    if chair.get("status") == "ok":
+        k = len(chair.get("dissent") or [])
+        out.append((f"{k} dissent{'s' if k != 1 else ''}", "kept on record") if k else ("No dissent", "on record"))
+    d = run.get("deliberation") or {}
+    if d.get("rounds"):
+        still = len(d.get("open") or [])
+        out.append((f"{still} open", f"point{'s' if still != 1 else ''} still disputed") if still
+                   else ("All settled", "after the debate"))
+    secs = run_seconds(run)
+    if secs:
+        out.append((duration(secs), "run time"))
+    out.append(_cost_value(run))
+    return out
+
+
+def _has_evidence(run: dict) -> bool:
+    from .followup import own_brief
+    return bool(run.get("files") or run.get("evidence") or own_brief(run) or (run.get("web") or {}).get("items"))
+
+
+def _chapters(run: dict, ok_chair: bool) -> dict:
+    """Section titles in report order. Appendices are lettered by what this run has, so there is never a gap."""
+    debate = bool((run.get("deliberation") or {}).get("rounds"))
+    letters = iter("ABCDEF")
+    return {"why": WHY if ok_chair else WHAT, "dis": DISAGREED if debate else None, "com": "The committee",
+            "A": f"Appendix {next(letters)} · Each seat's answer",
+            "B": f"Appendix {next(letters)} · The debate in full" if debate else None,
+            "C": f"Appendix {next(letters)} · Evidence" if _has_evidence(run) else None,
+            "D": f"Appendix {next(letters)} · How it ran and what it cost"}
+
+
+def _default_toc(run: dict, ch: dict) -> dict:
+    """First pass: every chapter at a placeholder page, so page 1 is laid out with the right number of lines."""
+    out: dict = {}
+    for key in ("why", "dis", "com", "A", "B", "C", "D"):
+        if ch.get(key):
+            out[ch[key]] = 88
+        if key == "A":
+            out.update({f"seat:{x['name']}": 88 for x in _seats(run)})
+    return out
+
+
+def _two_lists(w: _W, a: tuple, b: tuple):
+    """Two short headed lists side by side (stacked when one is missing or either is long)."""
+    pdf = w.pdf
+    (ta, ia), (tb, ib) = a, b
+    gap = 8
+    cw = (pdf.epw - gap) / 2
+
+    def height(items):
+        pdf.set_font("Sans", "", BODY)
+        return sum(pdf.multi_cell(cw - 4.5, BODY * 0.53, _plain(str(x)), dry_run=True, output="HEIGHT") + 0.9
+                   for x in items)
+
+    if not ia or not ib or max(height(ia), height(ib)) > 70:
+        for t, items in (a, b):
+            if items:
+                w.keep_list(t, items, after=0.9, above=3)
+        return
+    need = 9 + max(height(ia), height(ib))
+    if pdf.will_page_break(need + 4):
+        pdf.add_page()
+    else:
+        pdf.ln(4)
+    y, ends = pdf.get_y(), []
+    for k, (t, items) in enumerate((a, b)):
+        x = pdf.l_margin + k * (cw + gap)
+        pdf.set_y(y)
+        w.para(t, bold=True, lh=5.4, x=x, width=cw)
+        pdf.ln(1.6)
+        for it in items:
+            iy = pdf.get_y()
+            pdf.set_font("Sans", "", BODY)
+            pdf.set_text_color(*FAINT)
+            pdf.set_xy(x, iy)
+            pdf.cell(4.5, BODY * 0.53, "•")
+            pdf.set_y(iy)
+            w.para(str(it), x=x + 4.5, width=cw - 4.5, after=0.9)
+        ends.append(pdf.get_y())
+    pdf.set_y(max(ends))
+
+
+def _drop_verdict(md: str) -> str:
+    """The chairman's reasoning without its opening 'Verdict' section: the decision is already shown above it."""
+    m = re.match(r"\s*#{1,6}\s*(?:verdict|decision|recommendation)\b[^\n]*\n.*?(?=^#{1,6}\s|\Z)", md or "",
+                 re.I | re.S | re.M)
+    rest = (md or "")[m.end():] if m else (md or "")
+    return rest if rest.strip() else (md or "")
+
+
+def _lead(text: str, at_least: int = 60, limit: int = 180) -> str:
+    """A debate reply in one line: its first sentences, enough to carry the reason ('Hold.' alone does not)."""
+    out = ""
+    for part in arg_parts(text):
+        out = f"{out} {part}".strip()
+        if len(out) >= at_least:
+            break
+    return _clip_txt(out, limit)
+
 
 def _seats(run: dict) -> list[dict]:
     return sorted(run.get("seats") or [], key=lambda s: s["label"])
@@ -370,7 +574,7 @@ def _cost_value(run: dict) -> tuple[str, str]:
 def _figures(run: dict) -> list[tuple[str, str]]:
     seats = run.get("seats") or []
     ok = sum(1 for s in seats if (run["answers"].get(s["label"]) or {}).get("status") == "ok")
-    out = [(f"{ok} of {len(seats)}", "seats answered")]
+    out = [(f"{ok} of {len(seats)}", _answered_label(run))]
     secs = run_seconds(run)
     if secs:
         out.append((duration(secs), "run time"))
@@ -382,7 +586,8 @@ def _figures(run: dict) -> list[tuple[str, str]]:
         out.append((f"{n} file{'s' if n != 1 else ''}", f"evidence, {pics} photo{'s' if pics != 1 else ''}" if pics
                     else "evidence"))
     rk = run.get("ranking") or []
-    if rk:
+    from .engine import clear_first
+    if rk and clear_first(rk):
         top = _names(run).get(rk[0]["label"], rk[0]["label"])
         out.append((top, f"ranked first, {rk[0]['first_votes']} of {rk[0].get('votes') or len(rk)}"))
     return out
@@ -441,7 +646,7 @@ def _vote_chart(w: _W, run: dict):
         pdf.set_font("Sans", "B" if i == 0 else "", BODY)
         pdf.set_text_color(*INK)
         pdf.cell(label_w, 6, _fit(pdf, _plain(names.get(r["label"], r["label"])), label_w - 2))
-        score = rank_score(r["avg_rank"], n)
+        score = rank_score(r["avg_rank"], r.get("of") or n)
         x0 = pdf.l_margin + label_w
         pdf.set_fill_color(*TINT)
         pdf.rect(x0, y + 1.6, bar_w, 3, "F")
@@ -505,7 +710,9 @@ def _method_lines(run: dict) -> list[str]:
         out.insert(1, f"Research first: before the seats answered, one web search added {len(web.get('items') or [])} "
                       "passages with their sources to the evidence, the same for every seat."
                    if web.get("items") else f"Research first was on, but no web sources were added: {web.get('note') or 'not run'}")
-    out.append("Then each seat ranked the others' answers without knowing who wrote them (the blind vote)."
+    from .engine import self_votes_left_out
+    out.append("Then each seat ranked all the answers, its own included, without knowing who wrote which (the blind vote)"
+               + ("; its vote for its own answer is left out of the places." if self_votes_left_out(run) else ".")
                if run.get("review") else "There was no blind vote.")
     d = run.get("deliberation") or {}
     mode = {"material": "when they disagreed on the action or on a claim", "action": "only when they disagreed on the action",
@@ -571,7 +778,8 @@ def _method_lines(run: dict) -> list[str]:
     if u.get("cost_usd") is not None:
         line += f"; the providers reported ${u['cost_usd']:.4f}"
     out.append(line + ".")
-    return out + [f"Warning: {x}" for x in run.get("warnings") or []]
+    from .report_md import retry_lines
+    return out + retry_lines(run) + [f"Warning: {x}" for x in run.get("warnings") or []]
 
 
 def _stage_rows(run: dict) -> list[list[str]]:
@@ -588,15 +796,12 @@ def _stage_rows(run: dict) -> list[list[str]]:
     return rows
 
 
-def _deliberation(w: _W, run: dict, d: dict, chair: dict):
-    """Per disputed point: each seat's side before → after with its argument, then the chairman's call."""
+def _debate_full(w: _W, run: dict, d: dict, chair: dict):
+    """Per disputed point: each seat's side before → after with its whole argument, then the chairman's call."""
     pdf = w.pdf
-    w.heading("Deliberation", room=60)
-    pdf.start_section("Deliberation", level=1)
     rounds = len(d["rounds"])
-    w.para("**" + " · ".join(debate_tally(d)) + "**", after=1.2)
-    w.para((d.get("reason") or "") + f" The seats answered the points below in {rounds} round{'s' if rounds > 1 else ''}; "
-           "each had to hold or change its position and give its reason.", size=SMALL, color=MUTED, after=3)
+    w.para(f"Every argument as the seats gave it, over {rounds} round{'s' if rounds > 1 else ''}. "
+           "The summary is in Where they disagreed.", size=SMALL, color=MUTED, after=3)
     decided = delib_decided(chair, d["disputes"])
     kinds = {"action": "about the action", "claim": "about a claim the decision rests on", "emphasis": "emphasis"}
     for p in d["disputes"]:
@@ -612,7 +817,8 @@ def _deliberation(w: _W, run: dict, d: dict, chair: dict):
             lead, *rest = arg_parts((r or {}).get("argument") or pos["view"]) or [""]
             if pdf.will_page_break(26):
                 pdf.add_page()
-            w.item("•", f"**{pos['seat']}** · {pos['side']}{moved} · {word}", after=0.5)
+            w.item("•", f"**{pos['seat']}** · {pos['side']}{moved} · {word}"
+                   + unbacked_note(move_of(d, pos["seat"], p["id"])), after=0.5)
             if lead:
                 w.para(lead, indent=4.5, after=0.7)
             for t in rest:
@@ -627,27 +833,76 @@ def _deliberation(w: _W, run: dict, d: dict, chair: dict):
                    after=3)
         else:
             pdf.ln(2.4)
-    seats = [s["name"] for s in _seats(run)]
-    rows = []
-    for name in seats:
-        row = [name]
-        for p in d["disputes"]:
-            r = delib_last(d, name, p["id"])
-            start = next((q["side"] for q in p["positions"] if q["seat"] == name), None)
-            row.append(stance_word(r, start) if start is not None else "–")
+
+
+def _disagreements(w: _W, run: dict, d: dict, chair: dict, full: Optional[str], toc: dict):
+    """One card per disputed point: the chairman's call on top, then each seat's side before → after, whether it
+    moved, and its reason in one line. The whole arguments are in the appendix."""
+    pdf = w.pdf
+    w.para("**" + " · ".join(debate_tally(d)) + "**", after=1.2)
+    rounds = len(d["rounds"])
+    w.para((d.get("reason") or "") + f" The seats answered the points below in {rounds} round{'s' if rounds > 1 else ''}; "
+           "each had to hold or change its position and give its reason.", size=SMALL, color=MUTED, after=2)
+    decided = delib_decided(chair, d["disputes"])
+    kinds = {"action": "about the action", "claim": "about a claim the decision rests on", "emphasis": "emphasis"}
+    for p in d["disputes"]:
+        if pdf.will_page_break(58):
+            pdf.add_page()
+        else:
+            pdf.ln(3)
+        still = p["id"] in (d.get("open") or [])
+        w.para(f"**{p['id']} · {p['point']}**", after=0.4)
+        w.para(f"{kinds.get(p['level'], p['level'])} · {'still disputed' if still else 'settled'}", size=SMALL,
+               color=MUTED, after=1.8)
+        x = decided.get(p["id"])
+        if x:
+            w.callout("Chairman's call:", f"**{x['decided']}**",
+                      f"Because: {x['by_argument']}" if x.get("by_argument") else "")
+        rows = []
+        for pos in p["positions"]:
+            r = delib_last(d, pos["seat"], p["id"])
+            after = (r or {}).get("side")
+            side = f"{pos['side']} → **{after}**" if after and after != pos["side"] else pos["side"]
+            if (move_of(d, pos["seat"], p["id"]) or {}).get("unbacked"):
+                side += " (no new evidence)"
+            rows.append([pos["seat"], side, stance_word(r, pos["side"]),
+                         _lead((r or {}).get("argument") or pos["view"], 50, 125)])
+        w.table(["Seat", "Side: before → after", "Moved", "Its reason, in one line"], rows, (29, 38, 21, 74),
+                size=SMALL, md=True)
+    if full:
+        w.para(f"Each seat's whole argument: {full}, page {toc.get(full, '')}.", size=SMALL, color=MUTED)
+
+
+def _matrix(w: _W, run: dict):
+    """Who ranked whom: one row per reviewer, the place it gave each answer; its own answer shaded."""
+    pdf = w.pdf
+    names = _names(run)
+    order = [r["label"] for r in run.get("ranking") or []]
+    revs = [(x, (run.get("reviews") or {}).get(x["label"]) or {}) for x in _seats(run)]
+    revs = [(x, r) for x, r in revs if r.get("status") == "ok" and r.get("ranking")]
+    if not order or not revs:
+        return
+    rows, shade = [], set()
+    for i, (x, r) in enumerate(revs):
+        row = [x["name"]]
+        for j, lab in enumerate(order, 1):
+            pl = r["ranking"].index(lab) + 1 if lab in r["ranking"] else None
+            row.append("–" if pl is None else f"**{pl}**" if pl == 1 else str(pl))
+            if lab == x["label"]:
+                shade.add((i, j))
         rows.append(row)
-    if d["disputes"]:
-        k = len(d["disputes"])
-        first = 40
-        rest = (min(pdf.epw, 162) - first) / k
-        pdf.ln(2)
-        w.table(["Seat"] + [p["id"] for p in d["disputes"]], rows, (first,) + (rest,) * k, size=SMALL)
+    k = len(order)
+    first, rest = 38, min(22.0, (pdf.epw - 38) / k)
+    w.table(["Ranked by"] + [names.get(lab, lab) for lab in order], rows, (first,) + (rest,) * k,
+            align=("LEFT",) + ("CENTER",) * k, size=SMALL, md=True, shade=shade, width=first + rest * k)
+    w.para("Each row is one reviewer's ballot: the place it gave each answer (1 = best). Shaded: its own answer, "
+           + ("not counted in the places, " if _sv(run) else "")
+           + "which it ranked without knowing it was its own.", size=SMALL, color=MUTED)
 
 
 # ── page 1: executive summary ────────────────────────────────────────────────
 
-_CONTENTS = ("Decision in detail", "The committee", "The chairman's full reasoning", "Appendix A · Each seat's answer",
-             "Appendix B · Evidence", "Appendix C · How it ran and what it cost")
+WHY, WHAT, DISAGREED = "Why: the chairman's reasoning", "What happened", "Where they disagreed"
 # (bottom line, reason, action, condition, conditions shown): shorten text first, drop conditions last
 _EXEC_LIMITS = ((480, 220, 200, 200, 2), (420, 190, 170, 170, 2), (420, 190, 170, 170, 1), (360, 160, 140, 150, 1),
                 (300, 130, 120, 130, 1), (260, 110, 100, 0, 0))
@@ -657,6 +912,15 @@ EXEC_LAST = len(_EXEC_LIMITS) - 1
 def _clip_txt(text: str, n: int) -> str:
     text = str(text or "")
     return text if len(text) <= n else text[: n - 1].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
+def _defer_block(w: _W, chair: dict, ok_chair: bool):
+    """Under the decision box of a deferred verdict: what to find out, and the decision either way."""
+    lines = defer_lines(chair) if ok_chair else []
+    if lines:
+        w.pdf.ln(2)
+        for x in lines:
+            w.para(x, after=1.2)
 
 
 def _exec_page(w: _W, run: dict, ok_chair: bool, toc: dict, level: int):
@@ -675,6 +939,7 @@ def _exec_page(w: _W, run: dict, ok_chair: bool, toc: dict, level: int):
     w.para("  ·  ".join(meta), size=SMALL, color=MUTED, width=pdf.epw)
     pdf.ln(4.5)
     _decision_box(w, run.get("chair") or {}, ok_chair, run, brief=True)
+    _defer_block(w, run.get("chair") or {}, ok_chair)
     if es["ok"]:
         if es.get("change"):
             w.para(f"**Since the earlier run:** {es['change']}", color=MUTED)
@@ -687,26 +952,111 @@ def _exec_page(w: _W, run: dict, ok_chair: bool, toc: dict, level: int):
             w.heading("Do next", above=4, room=0)
             w.bullets([_clip_txt(a, lim_act) for a in es["actions"]], numbered=True, after=1.2)
             if es["more_actions"]:
-                w.para(f"{es['more_actions']} more in Decision in detail.", size=SMALL, color=MUTED)
+                w.para(f"{es['more_actions']} more under Next actions, page {toc.get(WHY, 2)}.", size=SMALL, color=MUTED)
         if es["reverse"] and n_rev:
             w.heading("What would change this", above=4, room=0)
             w.bullets([_clip_txt(r, lim_rev) for r in es["reverse"][:n_rev]], after=1.2)
-        pdf.ln(3)
-        w.para("How the committee stood: " + " · ".join(es["stood"]) + f" · {duration(run_seconds(run))}"
-               + f" · {_cost_value(run)[0]} {_cost_value(run)[1]}", size=SMALL, color=MUTED)
-    # contents with page numbers (filled in on the second pass), clickable
-    items = [(t, toc[t]) for t in _CONTENTS if t in toc]
-    if items:
-        pdf.ln(3)
-        pdf.set_draw_color(*RULE)
-        pdf.set_line_width(0.2)
-        pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + min(pdf.epw, MEASURE), pdf.get_y())
-        pdf.ln(2.5)
-        w.para("**Inside this report:** " + "  ·  ".join(f"[{t}]({p}) {p}" for t, p in items),
-               size=SMALL, color=MUTED)
-    pdf.exec_fit = pdf.page_no() == 1 and pdf.get_y() <= pdf.h - 24    # about 8 mm of air above the footer
+    # The figures and the contents never start a new page: when they do not fit, render() shortens the text
+    # above first; at the last level the seat lines fold into one, then the figures, then the contents go.
+    avail = pdf.h - 24 - pdf.get_y()
+    tiles_h = 24
+    full, short = _contents_height(w, run, toc, False), _contents_height(w, run, toc, True)
+    plan = next(((t, c) for t, c, need in ((True, False, tiles_h + full), (True, True, tiles_h + short),
+                                            (False, True, short), (False, None, 0)) if need <= avail), (False, None))
+    if plan[0]:
+        pdf.ln(4)
+        _strip(w, _exec_figures(run))
+    if plan[1] is not None:
+        _contents(w, run, toc, collapse=plan[1])
+    squeezed = plan != (True, False)
+    pdf.exec_fit = (pdf.page_no() == 1 and pdf.get_y() <= pdf.h - 24        # about 8 mm of air above the footer
+                    and not (squeezed and level < EXEC_LAST))
     if es.get("assembled"):
         pass                                   # older run: the page is built from the verdict's own fields
+
+
+def _contents_rows(toc: dict, collapse: bool) -> list:
+    rows: list[tuple[str, int, int]] = []                     # (title, page, level)
+    seats = [(k[5:], pg) for k, pg in toc.items() if k.startswith("seat:")]
+    for t, pg in toc.items():
+        if t.startswith("seat:"):
+            continue
+        rows.append((t, pg, 0))
+        if t.startswith("Appendix A") and seats:
+            if len(seats) <= 5 and not collapse:
+                rows += [(n, p, 1) for n, p in seats]
+            else:
+                rows.append(("  ·  ".join(f"{n} {p}" for n, p in seats), 0, 2))
+    return rows
+
+
+def _contents_split(rows: list) -> int:
+    # the right column starts at a main line: the appendices when that keeps the columns near even, else the
+    # main line that makes the taller column shortest
+    starts = [i for i, r in enumerate(rows) if i and not r[2]] or [len(rows)]
+    app = next((i for i in starts if rows[i][0].startswith("Appendix")), None)
+    best = min(max(i, len(rows) - i) for i in starts)
+    return app if app is not None and max(app, len(rows) - app) <= best + 2 else \
+        min(starts, key=lambda i: (max(i, len(rows) - i), i))
+
+
+def _contents_height(w: _W, run: dict, toc: dict, collapse: bool) -> float:
+    rows = _contents_rows(toc, collapse)
+    if not rows:
+        return 0.0
+    k = _contents_split(rows)
+    lines = lambda part: sum(9.0 if r[2] == 2 else 4.6 for r in part)
+    return 5 + 5.2 + max(lines(rows[:k]), lines(rows[k:])) + 1
+
+
+def _contents(w: _W, run: dict, toc: dict, collapse: bool = False):
+    """Page 1's contents: one list flowing over two columns, dot leaders and page numbers, every line a link.
+    Each seat gets its own indented line under Appendix A; a committee of more than five shares one line, so the
+    block stays short. Page numbers are filled in on the second pass."""
+    pdf = w.pdf
+    rows = _contents_rows(toc, collapse)
+    if not rows:
+        return
+    pdf.ln(5)
+    w.caps("Contents", width=pdf.epw)
+    gap, lh = 12, 4.6
+    cw = (pdf.epw - gap) / 2
+    split = _contents_split(rows)
+    top = pdf.get_y()
+    nw = 7
+
+    def row(x: float, y: float, title: str, page: int, level: int) -> float:
+        indent = 4 if level else 0
+        pdf.set_font("Sans", "", SMALL)
+        if level == 2:                                       # many seats on one line
+            pdf.set_text_color(*MUTED)
+            pdf.set_xy(x + indent, y)
+            pdf.multi_cell(cw - indent, 4.2, _plain(title), new_x=w.X.LEFT, new_y=w.Y.NEXT)
+            return pdf.get_y()
+        link = pdf.add_link(page=page)
+        tw = min(pdf.get_string_width(_plain(title)) + 0.5, cw - indent - nw - 4)
+        pdf.set_text_color(*(MUTED if level else INK))
+        pdf.set_xy(x + indent, y)
+        pdf.cell(tw, lh, _fit(pdf, _plain(title), tw), link=link)
+        room = cw - indent - tw - nw - 1
+        dot = pdf.get_string_width(" .")
+        if room > dot * 2:
+            pdf.set_text_color(*RULE if level else FAINT)
+            pdf.set_xy(x + cw - nw - 1 - dot * int(room / dot), y)
+            pdf.cell(dot * int(room / dot), lh, " ." * int(room / dot), link=link)
+        pdf.set_text_color(*(MUTED if level else INK))
+        pdf.set_font("Sans", "" if level else "B", SMALL)
+        pdf.set_xy(x + cw - nw, y)
+        pdf.cell(nw, lh, str(page), align="R", link=link)
+        return y + lh
+
+    ends = []
+    for col, part in enumerate((rows[:split], rows[split:])):
+        y = top
+        for t, pg, lvl in part:
+            y = row(pdf.l_margin + col * (cw + gap), y, t, pg, lvl)
+        ends.append(y)
+    pdf.set_xy(pdf.l_margin, max(ends) + 1)
 
 
 # ── page-1 blocks ────────────────────────────────────────────────────────────
@@ -723,7 +1073,7 @@ def _decision_box(w: _W, chair: dict, ok_chair: bool, run: dict, brief: bool = F
         pdf.set_y(target_y + pad)
         x = pdf.l_margin + bar + pad
         if ok_chair:
-            w.caps("Decision", color=w.accent, x=x, width=inner)
+            w.caps("Not yet: one fact decides it" if chair.get("defer") else "Decision", color=w.accent, x=x, width=inner)
             w.para(chair.get("decision") or "—", size=SECTION, bold=True, lh=6.2, x=x, width=inner)
             pdf.ln(2)
             conf = (chair.get("confidence") or "not stated").capitalize()
@@ -798,8 +1148,9 @@ def _changed(w: _W, prev: dict, chair: dict, ok_chair: bool):
     pdf.ln(2)
 
 
-def _seat_band(w: _W, s: dict, a: dict, place_txt: str):
-    """A seat's header: a light band with the name, then model, confidence and peer place."""
+def _seat_band(w: _W, s: dict, a: dict, place_txt: str, logo: Optional[bytes] = None):
+    """A seat's header: a light band with the maker's logo and the name, then model, confidence and peer place."""
+    import io
     pdf = w.pdf
     if pdf.will_page_break(60):
         pdf.add_page()
@@ -809,10 +1160,14 @@ def _seat_band(w: _W, s: dict, a: dict, place_txt: str):
     pdf.rect(pdf.l_margin, y, pdf.epw, h, "F")
     pdf.set_fill_color(*w.accent)
     pdf.rect(pdf.l_margin, y, 1.2, h, "F")
-    pdf.set_xy(pdf.l_margin + 5, y + 2.2)
+    lx = 0
+    if logo:
+        pdf.image(io.BytesIO(logo), x=pdf.l_margin + 5, y=y + 2.9, w=4.6, h=4.6)
+        lx = 6.6
+    pdf.set_xy(pdf.l_margin + 5 + lx, y + 2.2)
     pdf.set_font("Sans", "B", SECTION)
     pdf.set_text_color(*INK)
-    pdf.cell(pdf.epw - 8, 6, _fit(pdf, _plain(s["name"]), pdf.epw - 8))
+    pdf.cell(pdf.epw - 8 - lx, 6, _fit(pdf, _plain(s["name"]), pdf.epw - 8 - lx))
     pdf.set_xy(pdf.l_margin + 5, y + 8.6)
     pdf.set_font("Sans", "", SMALL)
     pdf.set_text_color(*MUTED)
@@ -828,104 +1183,122 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
     from .followup import name_chair, own_brief
     from .insights import run_insights
     pdf, XPos, YPos = _new_pdf(run, theme)
-    w = _W(pdf, XPos, YPos, theme, ev_page)
+    from .citations import known as _known
+    w = _W(pdf, XPos, YPos, theme, ev_page, _known(run))
     chair = run.get("chair") or {}
     ok_chair = chair.get("status") == "ok"
     if ok_chair:
         chair = name_chair(chair, run.get("seats") or [])
     names = _names(run)
     rank = {r["label"]: r for r in run.get("ranking") or []}
-    place = {r["label"]: i + 1 for i, r in enumerate(run.get("ranking") or [])}
+    from .engine import places as _places
+    place = _places(run.get("ranking") or [])
     n_ranked = len(place)
+
+    ch = _chapters(run, ok_chair)
+    toc = toc or _default_toc(run, ch)
+    d = run.get("deliberation") or {}
 
     # ── page 1: executive summary ───────────────────────────────────────────
     pdf.add_page()
     pdf.start_section("Executive summary")
-    _exec_page(w, run, ok_chair, toc or {t: 88 for t in _CONTENTS}, level)
+    _exec_page(w, run, ok_chair, toc, level)
 
-    # ── decision in detail ───────────────────────────────────────────────────
-    w.section("Decision in detail", new_page=True)
-    detail_page = pdf.page_no()
-    _decision_box(w, chair, ok_chair, run)
-    w.para(("**Follow-up question:** " if run.get("follow_of") else "**Question:** ") + run["question"], size=BODY,
-           color=MUTED)
-    if delib_line(run):
-        pdf.ln(1.5)
-        w.para(delib_line(run), size=BODY, color=MUTED)
-    pdf.ln(3.5)
-    _strip(w, _figures(run))
-
+    # ── why: the chairman's reasoning (or what happened) ─────────────────────
+    w.section(ch["why"], new_page=True)
     prev = _earlier(run, out_path)
-    if prev:
-        _changed(w, prev, chair, ok_chair)
-
+    q = ("**Follow-up question:** " if run.get("follow_of") else "**Question:** ") + run["question"]
     if ok_chair:
-        if chair.get("reverse_if"):
-            w.keep_list("It would reverse if", chair["reverse_if"], after=0.9, above=2)
-        if chair.get("next_actions"):
-            w.keep_list("Next actions", chair["next_actions"], numbered=True, after=0.9, above=2)
-        if chair.get("dissent") and not pdf.will_page_break(10):
+        conf = (chair.get("confidence") or "not stated").lower()
+        w.callout("DECISION", f"**{chair.get('decision') or '—'}**",
+                  f"Confidence {conf}" + (f": {chair['confidence_note']}" if chair.get("confidence_note") else "."))
+        w.para(q, color=MUTED, after=1)
+        if delib_line(run) and not ch["dis"]:          # why there was no debate (the next page covers one)
+            w.para(delib_line(run), size=SMALL, color=MUTED, after=1)
+        if prev:
             pdf.ln(2)
-            w.para(f"Dissent kept on record: {', '.join(d.get('name') or d.get('label') for d in chair['dissent'])} "
-                   "(see The committee).", size=SMALL, color=MUTED)
+            _changed(w, prev, chair, ok_chair)
+        reasoning = _drop_verdict(chair.get("final_answer") or "")
+        if reasoning.strip():
+            w.markdown(reasoning)
+        acts = chair.get("next_actions") or []
+        if acts:
+            parts = [re.split(r"\s+·\s+", _plain(a)) for a in acts]
+            if all(2 <= len(x) <= 3 for x in parts):
+                w.heading("Next actions", room=40)
+                w.table(["#", "Action", "Who", "When"],
+                        [[str(i), x[0], x[1], x[2] if len(x) > 2 else ""] for i, x in enumerate(parts, 1)],
+                        (8, 88, 38, 28), size=SMALL)
+            else:
+                w.keep_list("Next actions", acts, numbered=True, after=0.9, above=2)
+        _two_lists(w, ("It would reverse if", chair.get("reverse_if") or []),
+                   ("Where they agreed", chair.get("agreement") or []))
+        if chair.get("open_questions"):
+            w.keep_list("Still open", chair["open_questions"], after=0.9, above=3)
+        if chair.get("dissent"):
+            w.heading("Dissent kept on record")
+            for x in chair["dissent"]:
+                w.para(f"**{x.get('name') or names.get(x.get('label'), x.get('label'))}.** {x['view']}", after=2.6)
+        drifted = [x for x in chair.get("role_fit") or [] if x.get("fit") == "drifted"]
+        if drifted:
+            w.heading("Drifted from role")
+            w.bullets([f"{x['seat']}: {x['note']}" if x.get("note") else x["seat"] for x in drifted])
+        solo = solo_lines(run)
+        if solo:
+            w.heading(solo[0])
+            for i, x in enumerate(solo[1:]):
+                w.para(x, color=MUTED if i == 0 else INK, after=2.2)
+    else:
+        _decision_box(w, chair, ok_chair, run)
+        w.para(q, color=MUTED)
+        if delib_line(run) and not ch["dis"]:
+            pdf.ln(1.5)
+            w.para(delib_line(run), size=SMALL, color=MUTED)
+        if prev:
+            pdf.ln(2)
+            _changed(w, prev, chair, ok_chair)
+
+    # ── where they disagreed ─────────────────────────────────────────────────
+    if ch["dis"]:
+        w.section(ch["dis"], new_page=True)
+        _disagreements(w, run, d, chair if ok_chair else {}, ch["B"], toc)
 
     # ── the committee ────────────────────────────────────────────────────────
-    w.section("The committee", new_page=pdf.page_no() == detail_page, room=90)
-    rows = []
+    w.section(ch["com"], new_page=True)
+    rows, logos = [], []
     for s in _seats(run):
         a = run["answers"].get(s["label"]) or {}
         r = rank.get(s["label"])
-        rows.append([s["name"], short_model(s) + answered_by(run, s["name"]), "yes" if a.get("status") == "ok" else a.get("status", "not run"),
+        rows.append([s["name"], table_model(s) + answered_by(run, s["name"]), "yes" if a.get("status") == "ok" else a.get("status", "not run"),
                      conf_text(a.get("confidence")),
                      f"{ordinal(place[s['label']])} of {n_ranked}" if r else "–", str(r["first_votes"]) if r else "–"])
-    w.table(["Seat", "Model", "Answered", "Confidence", "Peer place", "1st votes"], rows, (30, 44, 20, 28, 22, 18),
-            align=("LEFT", "LEFT", "LEFT", "LEFT", "RIGHT", "RIGHT"))
-    w.para(f"Chairman: {short_model(run['chairman'])}{answered_by(run, 'Chairman')}. Provider routes are listed with each seat in Appendix A.",
-           size=SMALL, color=MUTED)
+        logos.append(_slot_logo(run, s, s["name"]))
+    w.table(["", "Seat", "Model", "Answered", "Confidence", "Peer place", "1st votes"], rows, (7, 29, 40, 18, 26, 22, 20),
+            align=("LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "RIGHT", "RIGHT"), logos=logos)
+    w.logo_line(_slot_logo(run, run.get("chairman") or {}, "Chairman", MUTED),
+                f"Chairman: {table_model(run['chairman'])}{answered_by(run, 'Chairman')}. Providers and full model "
+                f"names are listed with each seat in {ch['A'].split(' · ')[0]}.")
 
     w.heading("Positions")
     for s in _seats(run):
         a = run["answers"].get(s["label"]) or {}
         text = a.get("summary") if a.get("status") == "ok" else f"did not answer ({a.get('error', 'not run')})"
-        w.para(f"**{s['name']}.** {text or '—'}", after=2.6)
-
-    if ok_chair and chair.get("dissent"):
-        w.heading("Dissent kept on record")
-        for d in chair["dissent"]:
-            w.para(f"**{d.get('name') or names.get(d.get('label'), d.get('label'))}.** {d['view']}", after=2.6)
-
-    d = run.get("deliberation") or {}
-    if d.get("rounds"):
-        _deliberation(w, run, d, chair if ok_chair else {})
+        w.para(f"**{s['name']}.** {text or '—'}", after=1.8)
 
     if run.get("ranking"):
         w.heading("How they ranked each other", room=50)
-        w.para("Each seat ranked the others' answers without knowing who wrote them, in a shuffled order. "
-               "A longer bar means a better average place.", size=SMALL, color=MUTED, after=3)
-        _vote_chart(w, run)
-        w.bullets(_ballots(run), SMALL, after=0.8)
+        w.para("Each seat ranked all the answers, its own included, without knowing who wrote which, in a shuffled "
+               + ("order; its vote for its own answer is left out of the places. " if _sv(run) else "order. ")
+               + "Columns run from the best-placed answer to the last.", size=SMALL, color=MUTED, after=2)
+        _matrix(w, run)
 
     found = run_insights(run) if run.get("reviews") else []
     if found:
         w.heading("What the run reveals")
-        w.bullets([f"**{f['title']}.** {f['text']}" for f in found])
-
-    if ok_chair:
-        if chair.get("agreement"):
-            w.heading("Where they agreed")
-            w.bullets(chair["agreement"])
-        if chair.get("open_questions"):
-            w.heading("Open questions")
-            w.bullets(chair["open_questions"])
-        drifted = [x for x in chair.get("role_fit") or [] if x.get("fit") == "drifted"]
-        if drifted:
-            w.heading("Drifted from role")
-            w.bullets([f"{x['seat']}: {x['note']}" if x.get("note") else x["seat"] for x in drifted])
-        w.section("The chairman's full reasoning", new_page=True)
-        w.markdown(chair["final_answer"])
+        w.bullets([f"**{f['title']}.** {f['text']}" for f in found], size=SMALL, after=1.2)
 
     # ── appendix A: seats ────────────────────────────────────────────────────
-    w.section("Appendix A · Each seat's answer", new_page=True)
+    w.section(ch["A"], new_page=True)
     for i, s in enumerate(_seats(run)):
         a = run["answers"].get(s["label"]) or {}
         if i:
@@ -934,8 +1307,10 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
             else:
                 pdf.ln(8)
         pdf.start_section(_plain(s["name"]), level=1)
+        w.pages.setdefault(f"seat:{s['name']}", pdf.page_no())
         r = rank.get(s["label"])
-        _seat_band(w, {**s, "_answered_by": answered_by(run, s["name"])}, a, f"peer place {ordinal(place[s['label']])} of {n_ranked}" if r else "")
+        _seat_band(w, {**s, "_answered_by": answered_by(run, s["name"])}, a,
+                   f"peer place {ordinal(place[s['label']])} of {n_ranked}" if r else "", _slot_logo(run, s, s["name"]))
         if s.get("instructions"):
             w.heading("Instructions given", above=1)
             w.para(s["instructions"], color=MUTED)
@@ -958,21 +1333,26 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
         crit = [(names.get(rl, rl), e) for rl, rv in (run.get("reviews") or {}).items() if rv.get("status") == "ok"
                 for e in rv.get("evaluations") or [] if e["label"] == s["label"]]
         if crit:
-            w.heading("What the other seats said about it")
-            w.bullets([f"**{who}.** Strengths: {e['strengths'] or '—'} Weaknesses: {e['weaknesses'] or '—'}"
-                       for who, e in crit])
+            w.heading("What the reviewers said about it")
+            w.bullets([f"**{who}{' (its own answer, unknowingly)' if who == s['name'] else ''}.** "
+                       f"Strengths: {e['strengths'] or '—'} Weaknesses: {e['weaknesses'] or '—'}" for who, e in crit])
         w.heading("Full answer")
         w.markdown(a["answer"])
 
-    # ── appendix B: evidence ─────────────────────────────────────────────────
+    # ── appendix: the debate in full ─────────────────────────────────────────
+    if ch["B"]:
+        w.section(ch["B"], new_page=True)
+        _debate_full(w, run, d, chair if ok_chair else {})
+
+    # ── appendix: evidence ───────────────────────────────────────────────────
     ev_start = None
     background = own_brief(run)
     web = run.get("web") or {}
-    if run.get("files") or run.get("evidence") or background or web.get("items"):
-        w.section("Appendix B · Evidence", new_page=True)
+    if ch["C"]:
+        w.section(ch["C"], new_page=True)
         ev_start = pdf.page_no()
         if run.get("files"):
-            w.para("The seats cite text as [E1], [E2]… and photos as [I1], [I2]…. Citations in this report link here.",
+            w.explain("The seats cite text as [E1], [E2]… and photos as [I1], [I2]…. Citations in this report link here.",
                    size=SMALL, color=MUTED, after=3)
             w.table(["ID", "File", "Where", "Type", "Size", "Tokens", "Notes"], _evidence_rows(run),
                     (10, 40, 30, 14, 15, 15, 38), align=("LEFT", "LEFT", "LEFT", "LEFT", "RIGHT", "RIGHT", "LEFT"),
@@ -991,7 +1371,7 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
                     w.item("•", f"**[{img['id']}] {img['source']}{where}.** {desc}{by}", after=2.4)
         if web.get("items"):
             w.heading("Web sources (Research first)")
-            w.para("Found by one web search before the seats answered; every seat got the same passages, cited as "
+            w.explain("Found by one web search before the seats answered; every seat got the same passages, cited as "
                    "[W1], [W2]…. Unverified" + (f"; accessed {web['accessed']}" if web.get("accessed") else "") + ".",
                    size=SMALL, color=MUTED, after=2)
             for x in web["items"]:
@@ -1004,8 +1384,8 @@ def _build(run: dict[str, Any], out_path: Path, ev_page: Optional[int], theme: d
             w.heading("Background given to the seats")
             w.markdown(background)
 
-    # ── appendix C: method and cost ──────────────────────────────────────────
-    w.section("Appendix C · How it ran and what it cost", room=90)
+    # ── appendix: method and cost ────────────────────────────────────────────
+    w.section(ch["D"], room=90)
     w.bullets(_method_lines(run))
     rows = _stage_rows(run)
     if rows:
